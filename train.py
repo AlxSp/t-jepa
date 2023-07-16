@@ -2,6 +2,7 @@
 import copy
 
 from dataclasses import dataclass
+from schedulers import CosineWDSchedule, WarmupCosineSchedule
 from src.models.encoder import Encoder, EncoderConfig, Predictor, PredictorConfig
 from transformers import LlamaTokenizer
 from datasets import load_from_disk
@@ -45,9 +46,11 @@ target_block_num = 4
 
 
 #%%
-tokenizer = LlamaTokenizer.from_pretrained('llama_tokenizer')
-context_encoder = Encoder(small_encoder_config)
-target_encoder = copy.deepcopy(context_encoder)
+tokenizer = LlamaTokenizer.from_pretrained('llama_tokenizer') # initialize tokenizer
+context_encoder = Encoder(small_encoder_config) # initialize context encoder
+target_encoder = copy.deepcopy(context_encoder) # create target encoder as a copy of context encoder
+
+predictor = Predictor(small_encoder_config) # initialize predictor
 
 #%%
 # freeze target encoder
@@ -55,44 +58,85 @@ for param in target_encoder.parameters():
     param.requires_grad = False
 
 #%%
+dataset = load_from_disk('data/TinyStories')
+
+
+#%%
 @dataclass
 class OptimizerConfig:
+    num_epochs = 100
     ema = (0.996, 1.0)
     ipe_scale = 1.0
-    num_epochs = 100
+    final_lr = 1.0e-06
+    final_weight_decay = 0.4
+    lr = 0.001
+    start_lr = 0.0002
+    warmup = 40
+    weight_decay = 0.04
 
 #%%
-# optimizer = torch.optim.AdamW(param_groups)
-# scheduler = WarmupCosineSchedule(
-#     optimizer,
-#     warmup_steps=int(warmup*iterations_per_epoch),
-#     start_lr=start_lr,
-#     ref_lr=ref_lr,
-#     final_lr=final_lr,
-#     T_max=int(ipe_scale*num_epochs*iterations_per_epoch))
-# wd_scheduler = CosineWDSchedule(
-#     optimizer,
-#     ref_wd=wd,
-#     final_wd=final_wd,
-#     T_max=int(ipe_scale*num_epochs*iterations_per_epoch))
-# scaler = torch.cuda.amp.GradScaler() if use_bfloat16 else None
+opt_config = OptimizerConfig()
 
-#%%
 # init momentum scheduler
-ema = (0.996, 1.0)#opt_config.ema
-ipe_scale = 1.0 #opt_config.ipe_scale
-ipe = 1
-num_epochs = 100 #opt_config.num_epochs
+ema = opt_config.ema#opt_config.ema
+ipe_scale = opt_config.ipe_scale
+iterations_per_epoch = len(dataset['train'])
+num_epochs = opt_config.num_epochs
+final_lr = opt_config.final_lr
+final_wd = opt_config.final_weight_decay
+lr = opt_config.lr
+start_lr = opt_config.start_lr
+warmup = opt_config.warmup
+wd = opt_config.weight_decay
+
 batch_size = 1
-
-momentum_scheduler = (ema[0] + i*(ema[1]-ema[0])/(ipe*num_epochs*ipe_scale)
-                          for i in range(int(ipe*num_epochs*ipe_scale)+1))
+use_bfloat16 = False
 
 #%%
-predictor = Predictor(small_encoder_config)
+
+param_groups = [
+        {
+            'params': (p for n, p in context_encoder.named_parameters()
+                       if ('bias' not in n) and (len(p.shape) != 1))
+        }, {
+            'params': (p for n, p in predictor.named_parameters()
+                       if ('bias' not in n) and (len(p.shape) != 1))
+        }, {
+            'params': (p for n, p in context_encoder.named_parameters()
+                       if ('bias' in n) or (len(p.shape) == 1)),
+            'WD_exclude': True,
+            'weight_decay': 0
+        }, {
+            'params': (p for n, p in predictor.named_parameters()
+                       if ('bias' in n) or (len(p.shape) == 1)),
+            'WD_exclude': True,
+            'weight_decay': 0
+        }
+    ]
+
+optimizer = torch.optim.AdamW(param_groups)
+scheduler = WarmupCosineSchedule(
+    optimizer,
+    warmup_steps=int(warmup*iterations_per_epoch),
+    start_lr=start_lr,
+    ref_lr=lr,
+    final_lr=final_lr,
+    T_max=int(ipe_scale*num_epochs*iterations_per_epoch))
+wd_scheduler = CosineWDSchedule(
+    optimizer,
+    ref_wd=wd,
+    final_wd=final_wd,
+    T_max=int(ipe_scale*num_epochs*iterations_per_epoch))
+scaler = torch.cuda.amp.GradScaler() if use_bfloat16 else None
+
+
+
+momentum_scheduler = (ema[0] + i*(ema[1]-ema[0])/(iterations_per_epoch*num_epochs*ipe_scale)
+                          for i in range(int(iterations_per_epoch*num_epochs*ipe_scale)+1))
 
 #%%
-dataset = load_from_disk('data/TinyStories')
+
+#%%
 
 #%%
 for index, sample in enumerate(tqdm(dataset['train'])):
@@ -154,6 +198,8 @@ prediction_count = batch_count * target_block_num
 # compute the target embeddings
 target_embeddings = target_encoder(tokenized['input_ids']) # get target embeddings, no need to provide input indices.
 
+#TODO: normalize the target embeddings?
+
 #%%
 # create the indices for the target blocks
 true_input_lengths = torch.sum(tokenized['attention_mask'], dim = 1) # get the true input length for each sample
@@ -167,8 +213,13 @@ target_blocks_embeddings = torch.stack([target_embeddings[index,target_block_ran
 for index, sample_range in enumerate(target_block_indices):
     for jndex, _range in enumerate(sample_range):
         print(index, jndex, _range)
-        assert torch.all(target_embeddings[index, _range, :] == target_blocks_embeddings[index, jndex, :])
+        assert torch.all(target_embeddings[index, _range, :] == target_blocks_embeddings[index, jndex, :]) # make sure the target blocks embeddings are correctly selected
 
+# target embeddings are arranged in 
+# ((batch_sample_0, target_block_0, embedding_size),
+# (batch_sample_0, target_block_1, embedding_size),
+# (batch_sample_0, target_block_2, embedding_size), 
+# etc.)
 
 
 #%%
@@ -197,13 +248,13 @@ context_blocks_embeddings = context_encoder(torch.gather(tokenized['input_ids'],
 # predict target blocks from context blocks
 mask_token_embedding = F.normalize(torch.ones(small_encoder_config.n_embd), dim = 0) #TODO: replace dummy embedding, initialize the mask token embedding
 
-#%%
+# mask_toke_embeddings are the same so we can just repeat them
 prediction_embeddings = mask_token_embedding.repeat(target_block_num * batch_count, block_size, 1) # for the number of target blocks, for the number of targets per block, repeat the mask token 
-context_embeddings = context_blocks_embeddings.repeat(target_block_num, 1, 1) # for the number of target blocks, repeat the context embeddings
+context_embeddings = context_blocks_embeddings.repeat_interleave(target_block_num, dim = 0) #.repeat(target_block_num, 1, 1) # for the number of target blocks, repeat the context embeddings
 input_embeddings = torch.cat((context_embeddings, prediction_embeddings), dim = 1) # concatenate the context and prediction embeddings
 
 #%%
-input_indices = torch.cat((context_blocks_indices.repeat(target_block_num, 1), target_block_indices.view(prediction_count, -1)), dim = 1) # concatenate the context and target indices
+input_indices = torch.cat((context_blocks_indices.repeat_interleave(target_block_num, dim = 0), target_block_indices.view(prediction_count, -1)), dim = 1) # concatenate the context and target indices
 
 predicted_embeddings = predictor(input_embeddings, input_indices) # predict the target embeddings
 
@@ -214,11 +265,19 @@ masked_embeddings = predicted_embeddings[:,context_length:] # remove the context
 # compute the loss of the masked predictions
 loss = F.smooth_l1_loss(masked_embeddings, target_blocks_embeddings.view(masked_embeddings.shape)) # compute the loss
 
-#%%
+print(loss.item())
+
+if use_bfloat16:
+    scaler.scale(loss).backward()
+    scaler.step(optimizer)
+    scaler.update()
+else:
+    loss.backward()
+    optimizer.step()
+# grad_stats = grad_logger(encoder.named_parameters())
+optimizer.zero_grad()
+
 with torch.no_grad():
     m = next(momentum_scheduler)
     for param_q, param_k in zip(context_encoder.parameters(), target_encoder.parameters()):
         param_k.data.mul_(m).add_((1.-m) * param_q.detach().data)
-
-#%%
-target_embeddings.shape[0]
