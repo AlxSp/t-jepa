@@ -62,8 +62,7 @@ torch.stack(individually_rotated).shape
 
 #%%
 n_inputs = 1024
-n_total = 1024 * 8
-index_ranges = torch.arange(1024)
+index_ranges = torch.arange(n_inputs)
 mod_index_ranges = index_ranges[idx]
 i_rq_2 = rotary_emb.rotate_queries_or_keys(q[:,:,mod_index_ranges], indices=mod_index_ranges.unsqueeze(0))
 
@@ -71,7 +70,7 @@ assert torch.allclose(rq[:,:,mod_index_ranges], i_rq_2), 'rotary embeddings shou
 
 
 unshuf_order = torch.zeros_like(mod_index_ranges)
-unshuf_order[mod_index_ranges] = torch.arange(1024)
+unshuf_order[mod_index_ranges] = torch.arange(n_inputs)
 
 unshuffled_data = i_rq_2[:,:,unshuf_order] # Unshuffle the shuffled data
 assert torch.allclose(rq, unshuffled_data), 'rotary embeddings should be the same when indices are the same'
