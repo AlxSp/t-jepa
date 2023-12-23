@@ -85,7 +85,7 @@ max_target_mask_ratio = .25# how much of the input should be used for targets
 target_block_num = 4
 
 batch_size = 40
-accumulation_steps = 1
+accumulation_steps = 2
 eval_interval = 50
 
 random_seed = 42
@@ -122,8 +122,6 @@ elif init_from == "resume":
     optimizer = torch.optim.AdamW(context_encoder.parameters())
 
     train_run_data = torch.load(os.path.join(out_dir, 'train_run_save_dict.pt'))
-
-    # iter_num = train_run_data['iter_num']
 
     # freeze target encoder
     for param in target_encoder.parameters():
@@ -216,7 +214,7 @@ lr_scheduler = WarmupCosineSchedule(
     ref_lr=lr,
     final_lr=final_lr,
     T_max=int(ipe_scale*num_epochs*iterations_per_epoch),
-    step=iter_num
+    step=iter_num // accumulation_steps
 )
 
 wd_scheduler = CosineWDSchedule(
@@ -224,14 +222,14 @@ wd_scheduler = CosineWDSchedule(
     ref_wd=wd,
     final_wd=final_wd,
     T_max=int(ipe_scale*num_epochs*iterations_per_epoch),
-    step=iter_num
+    step=iter_num // accumulation_steps
 )
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 momentum_scheduler = (ema[0] + i*(ema[1]-ema[0])/(iterations_per_epoch*num_epochs*ipe_scale)
-                          for i in range(iter_num, int(iterations_per_epoch*num_epochs*ipe_scale)+1))
+                          for i in range(iter_num // accumulation_steps, int(iterations_per_epoch*num_epochs*ipe_scale)+1))
 
 #%%
 def get_batch(split, index, batch_size):
