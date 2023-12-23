@@ -70,7 +70,7 @@ print(f"init_from: {init_from}")
 
 out_dir = "out"
 
-max_iternum = 100 if not sys.argv[2:] else int(sys.argv[2])
+max_iter_num = 100 if not sys.argv[2:] else int(sys.argv[2])
 
 os.makedirs(out_dir, exist_ok=True)
 
@@ -78,6 +78,7 @@ context_encoder_path = os.path.join(out_dir, "context_encoder.pt")
 target_encoder_path = os.path.join(out_dir, "target_encoder.pt")
 predictor_path = os.path.join(out_dir, "predictor.pt")
 optimizer_path = os.path.join(out_dir, "optimizer.pt")
+train_run_state_path = os.path.join(out_dir, "train_run_state.pt")
 
 #%%
 max_context_mask_ratio = 0.8#1.0 # how much of the input should be included in the context
@@ -93,8 +94,8 @@ random_seed = 42
 #%%
 set_seed(random_seed)
 
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+# torch.backends.cudnn.deterministic = True
+# torch.backends.cudnn.benchmark = False
 
 #%%
 if init_from == "scratch":
@@ -121,7 +122,7 @@ elif init_from == "resume":
 
     optimizer = torch.optim.AdamW(context_encoder.parameters())
 
-    train_run_data = torch.load(os.path.join(out_dir, 'train_run_save_dict.pt'))
+    train_run_data = torch.load(train_run_state_path)
 
     # freeze target encoder
     for param in target_encoder.parameters():
@@ -141,7 +142,7 @@ dataset = load_from_disk('data/TinyStories').filter(lambda x: tokenizer(x['text'
 class OptimizerConfig:
     num_epochs = 100
     ema = (0.996, 1.0)
-    ipe_scale = 1.0
+    bipe_scale = 1.0
     final_lr = 1.0e-06
     final_weight_decay = 0.4
     lr = 0.001
@@ -153,9 +154,9 @@ class OptimizerConfig:
 opt_config = OptimizerConfig()
 
 # init momentum scheduler
-ema = opt_config.ema#opt_config.ema
-ipe_scale = opt_config.ipe_scale
-iterations_per_epoch = math.ceil(len(dataset['train']) / (batch_size * accumulation_steps)) # TODO: add .floor if the last batch should be dropped
+ema = opt_config.ema
+bipe_scale = opt_config.bipe_scale
+batch_iterations_per_epoch = math.ceil(len(dataset['train']) / (batch_size * accumulation_steps)) # TODO: add .floor if the last batch should be dropped
 num_epochs = opt_config.num_epochs
 final_lr = opt_config.final_lr
 final_wd = opt_config.final_weight_decay
@@ -202,6 +203,7 @@ param_groups = [
     ]
 
 iter_num = 0 if init_from == "scratch" else train_run_data['iter_num'] + 1
+weight_update_iter_num = iter_num // accumulation_steps # TODO: maybe it should be asserted that iter_num is divisible by accumulation_steps without remainder
 
 optimizer = torch.optim.AdamW(param_groups)
 if init_from == "resume":
@@ -209,27 +211,27 @@ if init_from == "resume":
 
 lr_scheduler = WarmupCosineSchedule(
     optimizer,
-    warmup_steps=int(warmup*iterations_per_epoch),
+    warmup_steps=int(warmup*batch_iterations_per_epoch),
     start_lr=start_lr,
     ref_lr=lr,
     final_lr=final_lr,
-    T_max=int(ipe_scale*num_epochs*iterations_per_epoch),
-    step=iter_num // accumulation_steps
+    T_max=int(bipe_scale*num_epochs*batch_iterations_per_epoch),
+    step=weight_update_iter_num
 )
 
 wd_scheduler = CosineWDSchedule(
     optimizer,
     ref_wd=wd,
     final_wd=final_wd,
-    T_max=int(ipe_scale*num_epochs*iterations_per_epoch),
-    step=iter_num // accumulation_steps
+    T_max=int(bipe_scale*num_epochs*batch_iterations_per_epoch),
+    step=weight_update_iter_num
 )
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
-momentum_scheduler = (ema[0] + i*(ema[1]-ema[0])/(iterations_per_epoch*num_epochs*ipe_scale)
-                          for i in range(iter_num // accumulation_steps, int(iterations_per_epoch*num_epochs*ipe_scale)+1))
+momentum_scheduler = (ema[0] + i*(ema[1]-ema[0])/(batch_iterations_per_epoch*num_epochs*bipe_scale)
+                          for i in range(weight_update_iter_num, int(batch_iterations_per_epoch*num_epochs*bipe_scale)+1))
 
 #%%
 def get_batch(split, index, batch_size):
@@ -238,7 +240,7 @@ def get_batch(split, index, batch_size):
 
 #%%
 best_loss = 1e9
-while iter_num < max_iternum:
+while iter_num < max_iter_num:
     set_seed(random_seed) #TODO: find better solution for reproducibility?
     epoch = iter_num // len(dataset["train"])
 
@@ -353,15 +355,13 @@ while iter_num < max_iternum:
         # compute the loss of the masked predictions
         loss = F.smooth_l1_loss(predicted_target_embeddings * relevant_target_attn_mask, target_blocks_embeddings.view(predicted_target_embeddings.shape) * relevant_target_attn_mask) # compute the loss
 
-    # print(loss.item(), iter_num)
-    # break if loss is nan
     assert not torch.isnan(loss), 'loss is nan!'
 
     loss /= accumulation_steps
     scaler.scale(loss).backward()
 
-    # if loss.item() < best_loss and iter_num % eval_interval == 0:
     # TODO: change to evaluation
+    # if loss.item() < best_loss and iter_num % eval_interval == 0:
     if (iter_num + 1) % accumulation_steps == 0:
         # TODO: add gradient accumulation
         scaler.step(optimizer)
@@ -387,18 +387,17 @@ while iter_num < max_iternum:
         torch.save(predictor.state_dict(), predictor_path)
         torch.save(optimizer.state_dict(), optimizer_path)
 
-        train_run_save_dict = {
+        train_run_state = {
                 'iter_num': iter_num,
                 'epoch': epoch,
                 'batch_idx': batch_idx,
                 'loss': loss.item(),
                 'batch_size': batch_size,
                 'torch_seed': torch.initial_seed(),
-                # 'scaler': None if scaler is None else scaler.state_dict(), # not needed
                 'lr': lr
             }
 
-        torch.save(train_run_save_dict, os.path.join(out_dir, 'train_run_save_dict.pt'))
+        torch.save(train_run_state, train_run_state_path)
 
         with open(os.path.join(out_dir, 'losses.jsonl'), 'a') as f:
             f.write(json.dumps({'loss': loss.item(), 'iter_num' : iter_num}) + '\n')
