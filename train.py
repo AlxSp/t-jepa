@@ -123,7 +123,7 @@ elif init_from == "resume":
 
     train_run_data = torch.load(os.path.join(out_dir, 'train_run_save_dict.pt'))
 
-    iter_num = train_run_data['iter_num']
+    # iter_num = train_run_data['iter_num']
 
     # freeze target encoder
     for param in target_encoder.parameters():
@@ -157,7 +157,7 @@ opt_config = OptimizerConfig()
 # init momentum scheduler
 ema = opt_config.ema#opt_config.ema
 ipe_scale = opt_config.ipe_scale
-iterations_per_epoch = math.ceil(len(dataset['train']) / batch_size) # TODO: add .floor if the last batch should be dropped
+iterations_per_epoch = math.ceil(len(dataset['train']) / (batch_size * accumulation_steps)) # TODO: add .floor if the last batch should be dropped
 num_epochs = opt_config.num_epochs
 final_lr = opt_config.final_lr
 final_wd = opt_config.final_weight_decay
@@ -203,7 +203,7 @@ param_groups = [
         }
     ]
 
-iter_num = 0 if init_from == "scratch" else train_run_data['iter_num']
+iter_num = 0 if init_from == "scratch" else train_run_data['iter_num'] + 1
 
 optimizer = torch.optim.AdamW(param_groups)
 if init_from == "resume":
@@ -355,15 +355,35 @@ while iter_num < max_iternum:
         # compute the loss of the masked predictions
         loss = F.smooth_l1_loss(predicted_target_embeddings * relevant_target_attn_mask, target_blocks_embeddings.view(predicted_target_embeddings.shape) * relevant_target_attn_mask) # compute the loss
 
-
     # print(loss.item(), iter_num)
     # break if loss is nan
     assert not torch.isnan(loss), 'loss is nan!'
 
+    loss /= accumulation_steps
+    scaler.scale(loss).backward()
+
     # if loss.item() < best_loss and iter_num % eval_interval == 0:
     # TODO: change to evaluation
-    if True:
-        best_loss = loss.item()
+    if (iter_num + 1) % accumulation_steps == 0:
+        # TODO: add gradient accumulation
+        scaler.step(optimizer)
+        scaler.update()
+
+        optimizer.zero_grad(set_to_none=True)
+
+        _new_lr = lr_scheduler.step()
+        _new_wd = wd_scheduler.step()
+
+
+        with torch.no_grad():
+            m = next(momentum_scheduler)
+            for param_q, param_k in zip(context_encoder.parameters(), target_encoder.parameters()):
+                param_k.data.mul_(m).add_((1.-m) * param_q.detach().data)
+
+        print(target_block_start_indices)
+        print(f'lr: {_new_lr}, wd: {_new_wd} m: {m} lss: {loss.item()} iter_num: {iter_num}')
+
+        # best_loss = loss.item()
         torch.save(context_encoder.state_dict(), context_encoder_path)
         torch.save(target_encoder.state_dict(), target_encoder_path)
         torch.save(predictor.state_dict(), predictor_path)
@@ -382,27 +402,8 @@ while iter_num < max_iternum:
 
         torch.save(train_run_save_dict, os.path.join(out_dir, 'train_run_save_dict.pt'))
 
-    scaler.scale(loss).backward()
-    # TODO: add gradient accumulation
-    scaler.step(optimizer)
-    scaler.update()
-
-    optimizer.zero_grad(set_to_none=True)
-
-    _new_lr = lr_scheduler.step()
-    _new_wd = wd_scheduler.step()
-
-
-    with torch.no_grad():
-        m = next(momentum_scheduler)
-        for param_q, param_k in zip(context_encoder.parameters(), target_encoder.parameters()):
-            param_k.data.mul_(m).add_((1.-m) * param_q.detach().data)
-
-    print(target_block_start_indices)
-    print(f'lr: {_new_lr}, wd: {_new_wd} m: {m} lss: {loss.item()} iter_num: {iter_num}')
-
-    with open(os.path.join(out_dir, 'losses.jsonl'), 'a') as f:
-        f.write(json.dumps({'loss': loss.item(), 'iter_num' : iter_num}) + '\n')
+        with open(os.path.join(out_dir, 'losses.jsonl'), 'a') as f:
+            f.write(json.dumps({'loss': loss.item(), 'iter_num' : iter_num}) + '\n')
 
     iter_num += 1
 

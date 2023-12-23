@@ -59,12 +59,12 @@ print('\n\n')
 with open(run_loss_file_path, 'r') as file:
     lines = file.readlines()
 with open(run_loss_file_path, 'w') as file:
-    file.write(''.join(lines[:-1]))
+    file.write(''.join(lines))
 
 with open(batch_file, 'r') as file:
     lines = file.readlines()
 with open(batch_file, 'w') as file:
-    file.write(''.join(lines[:-1]))
+    file.write(''.join(lines))
 
 
 # run train script again with same parameters but with resume scenario
