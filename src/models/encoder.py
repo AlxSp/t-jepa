@@ -1,3 +1,6 @@
+"""
+Code derived from https://github.com/karpathy/nanoGPT/model.py
+"""
 
 #%%
 import math

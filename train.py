@@ -11,7 +11,7 @@ import shutil
 import sys
 import numpy as np
 from torch.utils.data import DataLoader
-from schedulers import CosineWDSchedule, WarmupCosineSchedule
+from schedulers import CosineWDSchedule, ExponentialMovingAverageSchedule, WarmupCosineSchedule
 from src.models.encoder import Encoder, EncoderConfig, Predictor, PredictorConfig
 from transformers import LlamaTokenizer
 from datasets import load_from_disk
@@ -61,12 +61,38 @@ predictor_config = PredictorConfig(
     bias = True, # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better on small datasets
 )
 
+@dataclass
+class TrainRunConfig:
+    batch_size = 40
+    accumulation_steps = 2
+    eval_interval = 50
+    max_iter_num = 100
+    random_seed = 42
+
+train_run_config = TrainRunConfig()
+
+
+@dataclass
+class OptimizerConfig:
+    num_epochs = 100
+    ema = (0.996, 1.0)
+    bipe_scale = 1.0
+    final_lr = 1.0e-06
+    final_weight_decay = 0.4
+    lr = 0.001
+    start_lr = 0.0002
+    warmup = 40
+    weight_decay = 0.04
+
+#%%
+opt_config = OptimizerConfig()
+
 #%%
 init_from = "resume"
 init_from = "scratch"
 init_from = init_from if not sys.argv[1:] else sys.argv[1]
 
-print(f"init_from: {init_from}")
+print(f"init from: {init_from}")
 
 out_dir = "out"
 
@@ -85,11 +111,11 @@ max_context_mask_ratio = 0.8#1.0 # how much of the input should be included in t
 max_target_mask_ratio = .25# how much of the input should be used for targets
 target_block_num = 4
 
-batch_size = 40
-accumulation_steps = 2
-eval_interval = 50
+batch_size = train_run_config.batch_size
+accumulation_steps = train_run_config.accumulation_steps
+eval_interval = train_run_config.eval_interval
 
-random_seed = 42
+random_seed = train_run_config.random_seed
 
 #%%
 set_seed(random_seed)
@@ -138,20 +164,7 @@ tokenizer.pad_token = tokenizer.eos_token
 dataset = load_from_disk('data/TinyStories').filter(lambda x: tokenizer(x['text'], return_tensors="pt")['input_ids'].shape[1] > 8, num_proc=12)
 
 #%%
-@dataclass
-class OptimizerConfig:
-    num_epochs = 100
-    ema = (0.996, 1.0)
-    bipe_scale = 1.0
-    final_lr = 1.0e-06
-    final_weight_decay = 0.4
-    lr = 0.001
-    start_lr = 0.0002
-    warmup = 40
-    weight_decay = 0.04
 
-#%%
-opt_config = OptimizerConfig()
 
 # init momentum scheduler
 ema = opt_config.ema
@@ -174,6 +187,10 @@ assert device_type == 'cuda', 'CPU training is not supported'
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 type_casting = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+
+# initialize a GradScaler. If enabled=False scaler is a no-op
+scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+
 #%%
 # load the models to the device
 context_encoder.to(device)
@@ -227,11 +244,12 @@ wd_scheduler = CosineWDSchedule(
     step=weight_update_iter_num
 )
 
-# initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+ema_scheduler = ExponentialMovingAverageSchedule(
+    momentum=ema[0],
+    T_max=int(bipe_scale*num_epochs*batch_iterations_per_epoch),
+    step=weight_update_iter_num
+)
 
-momentum_scheduler = (ema[0] + i*(ema[1]-ema[0])/(batch_iterations_per_epoch*num_epochs*bipe_scale)
-                          for i in range(weight_update_iter_num, int(batch_iterations_per_epoch*num_epochs*bipe_scale)+1))
 
 #%%
 def get_batch(split, index, batch_size):
@@ -371,15 +389,10 @@ while iter_num < max_iter_num:
 
         _new_lr = lr_scheduler.step()
         _new_wd = wd_scheduler.step()
+        _new_m = ema_scheduler.step(context_encoder, target_encoder)
 
-
-        with torch.no_grad():
-            m = next(momentum_scheduler)
-            for param_q, param_k in zip(context_encoder.parameters(), target_encoder.parameters()):
-                param_k.data.mul_(m).add_((1.-m) * param_q.detach().data)
-
-        print(target_block_start_indices)
-        print(f'lr: {_new_lr}, wd: {_new_wd} m: {m} lss: {loss.item()} iter_num: {iter_num}')
+        # print(target_block_start_indices)
+        # print(f'lr: {_new_lr}, wd: {_new_wd} m: {m} lss: {loss.item()} iter_num: {iter_num}')
 
         # best_loss = loss.item()
         torch.save(context_encoder.state_dict(), context_encoder_path)
