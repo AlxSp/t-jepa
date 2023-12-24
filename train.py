@@ -31,18 +31,27 @@ def seed_worker(worker_id):
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
-#%%
-encoder_config = EncoderConfig(
-    block_size = 1024,
-    vocab_size = 32000, # LLAMA tokenizer is 32000, which is a multiple of 64 for efficiency
-    n_layer = 12,
-    n_head = 12,
-    n_embd = 768,
-    dropout = 0.0,
-    bias = True, # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better on small datasets
-)
+def dataclass_to_json(dataclass, path):
+    with open(path, 'w') as f:
+        json.dump(dataclass.__dict__, f, indent=2)
 
-small_encoder_config = EncoderConfig(
+def json_to_dataclass(dataclass, path):
+    with open(path, 'r') as f:
+        data = json.load(f)
+    return dataclass(**data)
+
+#%%
+# encoder_config = EncoderConfig(
+#     block_size = 1024,
+#     vocab_size = 32000, # LLAMA tokenizer is 32000, which is a multiple of 64 for efficiency
+#     n_layer = 12,
+#     n_head = 12,
+#     n_embd = 768,
+#     dropout = 0.0,
+#     bias = True, # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better on small datasets
+# )
+
+encoder_config = EncoderConfig(
     block_size = 1024,
     vocab_size = 32000, # LLAMA tokenizer is 32000, which is a multiple of 64 for efficiency
     n_layer = 8,
@@ -63,29 +72,45 @@ predictor_config = PredictorConfig(
 
 @dataclass
 class TrainRunConfig:
-    batch_size = 40
-    accumulation_steps = 2
-    eval_interval = 50
-    max_iter_num = 100
-    random_seed = 42
+    batch_size: int = 40
+    accumulation_steps: int = 4
+    eval_interval: int = 50
+    max_iter_num: int | None = 100
+    random_seed: int = 42
 
-train_run_config = TrainRunConfig()
+train_run_config = TrainRunConfig(
+    batch_size = 40,
+    accumulation_steps=4,
+    eval_interval=50,
+    max_iter_num=100,
+    random_seed=42
+)
 
 
 @dataclass
 class OptimizerConfig:
-    num_epochs = 100
-    ema = (0.996, 1.0)
-    bipe_scale = 1.0
-    final_lr = 1.0e-06
-    final_weight_decay = 0.4
-    lr = 0.001
-    start_lr = 0.0002
-    warmup = 40
-    weight_decay = 0.04
+    num_epochs: int = 100
+    ema: tuple[float, float] = (0.996, 1.0)
+    bipe_scale: float = 1.0
+    final_lr: float = 1.0e-06
+    final_weight_decay: float = 0.4
+    lr: float = 0.001
+    start_lr: float = 0.0002
+    warmup: int = 40
+    weight_decay: float = 0.04
 
 #%%
-opt_config = OptimizerConfig()
+opt_config = OptimizerConfig(
+    num_epochs = 100,
+    ema = (0.996, 1.0),
+    bipe_scale = 1.0,
+    final_lr = 1.0e-06,
+    final_weight_decay = 0.4,
+    lr = 0.001,
+    start_lr = 0.0002,
+    warmup = 40,
+    weight_decay = 0.04
+)
 
 #%%
 init_from = "resume"
@@ -106,6 +131,11 @@ predictor_path = os.path.join(out_dir, "predictor.pt")
 optimizer_path = os.path.join(out_dir, "optimizer.pt")
 train_run_state_path = os.path.join(out_dir, "train_run_state.pt")
 
+encoder_config_path = os.path.join(out_dir, "encoder_config.json")
+predictor_config_path = os.path.join(out_dir, "predictor_config.json")
+opt_config_path = os.path.join(out_dir, "opt_config.json")
+train_run_config_path = os.path.join(out_dir, "train_run_config.json")
+
 #%%
 max_context_mask_ratio = 0.8#1.0 # how much of the input should be included in the context
 max_target_mask_ratio = .25# how much of the input should be used for targets
@@ -117,15 +147,13 @@ eval_interval = train_run_config.eval_interval
 
 random_seed = train_run_config.random_seed
 
-#%%
-set_seed(random_seed)
 
-# torch.backends.cudnn.deterministic = True
-# torch.backends.cudnn.benchmark = False
 
 #%%
 if init_from == "scratch":
-    context_encoder = Encoder(small_encoder_config) # initialize context encoder
+    set_seed(random_seed)
+
+    context_encoder = Encoder(encoder_config) # initialize context encoder
     target_encoder = copy.deepcopy(context_encoder) # create target encoder as a copy of context encoder
     # freeze target encoder
     for param in target_encoder.parameters():
@@ -136,10 +164,20 @@ if init_from == "scratch":
     if os.path.exists(out_dir):
         shutil.rmtree(out_dir)
     os.makedirs(out_dir, exist_ok=True)
+
+    dataclass_to_json(encoder_config, encoder_config_path)
+    dataclass_to_json(predictor_config, predictor_config_path)
+    dataclass_to_json(opt_config, opt_config_path)
+    dataclass_to_json(train_run_config, train_run_config_path)
     
 elif init_from == "resume":
-    context_encoder = Encoder(small_encoder_config)
-    target_encoder = Encoder(small_encoder_config)
+    encoder_config = json_to_dataclass(EncoderConfig, encoder_config_path)
+    predictor_config = json_to_dataclass(PredictorConfig, predictor_config_path)
+    opt_config = json_to_dataclass(OptimizerConfig, opt_config_path)
+    train_run_config = json_to_dataclass(TrainRunConfig, train_run_config_path)
+
+    context_encoder = Encoder(encoder_config)
+    target_encoder = Encoder(encoder_config)
     predictor = Predictor(predictor_config)
 
     context_encoder.load_state_dict(torch.load(context_encoder_path))
@@ -154,6 +192,11 @@ elif init_from == "resume":
     for param in target_encoder.parameters():
         param.requires_grad = False
 
+#%%
+
+
+# torch.backends.cudnn.deterministic = True
+# torch.backends.cudnn.benchmark = False
 
 #%%
 tokenizer = LlamaTokenizer.from_pretrained('llama_tokenizer', use_fast = False) # initialize tokenizer
@@ -220,6 +263,7 @@ param_groups = [
     ]
 
 iter_num = 0 if init_from == "scratch" else train_run_data['iter_num'] + 1
+assert iter_num % accumulation_steps == 0, 'iter_num must be divisible by accumulation_steps without remainder'
 weight_update_iter_num = iter_num // accumulation_steps # TODO: maybe it should be asserted that iter_num is divisible by accumulation_steps without remainder
 
 optimizer = torch.optim.AdamW(param_groups)
@@ -352,7 +396,7 @@ while iter_num < max_iter_num:
         prediction_attn_mask = prediction_attn_mask.repeat_interleave(target_block_num, dim = 0)
 
         # predict target blocks from context blocks
-        mask_token_embedding = F.normalize(torch.ones(small_encoder_config.n_embd), dim = 0) #TODO: replace dummy embedding, initialize the mask token embedding
+        mask_token_embedding = F.normalize(torch.ones(encoder_config.n_embd), dim = 0) #TODO: replace dummy embedding, initialize the mask token embedding
         # mask_toke_embeddings are the same so we can just repeat them
         prediction_embeddings = mask_token_embedding.repeat(target_block_num * batch_count, max_target_block_size, 1) # for the number of target blocks, for the number of targets per block, repeat the mask token 
         context_embeddings = context_blocks_embeddings.repeat_interleave(target_block_num, dim = 0) #.repeat(target_block_num, 1, 1) # for the number of target blocks, repeat the context embeddings

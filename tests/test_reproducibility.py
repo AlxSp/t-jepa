@@ -10,7 +10,7 @@ def test_resume():
     #%%
     train_script = 'train.py'
     train_scenarios = ['scratch', 'resume']
-    main_iterations = 12
+    main_iterations = 16
     train_iterations = [main_iterations, main_iterations // 2]
     #%%
     # create loss directory if it does not exist
