@@ -41,8 +41,9 @@ pip install -e ./rotary-embedding-torch
 - [X] Save/Load models
 - [X] Save/Load optimizer & schedulers
 - [X] Ensure reproducibility
-- [ ] Log training info
-- [ ] Training runs
+- [X] Log training info
+- [X] Training runs
+- [ ] Double check loss function
 - [ ] Target Packing
 - [ ] UL2 targets
 - [ ] Context/Input Packing

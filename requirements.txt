@@ -4,3 +4,4 @@ transformers==4.35.2
 sentencepiece==0.1.99 
 datasets==2.15.0
 pytest==7.4.3
+wandb==0.16.1

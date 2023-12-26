@@ -283,6 +283,7 @@ class PredictorConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better
+    trainable_mask_emb: bool = False # True: mask token embedding is trainable. False: mask token embedding is fixed to normalized all-ones vector
 
 class Predictor(nn.Module):
 
@@ -296,6 +297,8 @@ class Predictor(nn.Module):
 
         self.in_proj = nn.Identity() if config.ext_n_embd == config.n_embd else nn.Linear(config.ext_n_embd, config.n_embd, bias=config.bias)
         self.out_proj = nn.Identity() if config.ext_n_embd == config.n_embd else nn.Linear(config.n_embd, config.ext_n_embd, bias=config.bias)
+
+        self.mask_embedding = nn.Parameter(torch.zeros(config.n_embd)) if config.trainable_mask_emb else F.normalize(torch.ones(config.ext_n_embd), dim = 0)
 
         self.transformer = nn.ModuleDict(dict(
             # wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -340,6 +343,10 @@ class Predictor(nn.Module):
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def get_mask_token_embedding(self):
+        return self.mask_embedding
+
 
     def forward(self, embeddings, id_indices=None, attn_mask=None):
         device = embeddings.device
