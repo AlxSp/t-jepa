@@ -116,27 +116,37 @@ opt_config = OptimizerConfig(
 )
 
 #%%
-wandb_log = True#False
+wandb_log = False
 wandb_project = "t-jepa"
 wandb_run_name = "t-jepa"
 
 init_from = "resume"
 init_from = "scratch"
 init_from = init_from if not sys.argv[1:] else sys.argv[1]
+resume_from = "train" # "train" or "best"
 
 print(f"init from: {init_from}")
 
 out_dir = "out"
+train_out_dir = os.path.join(out_dir, "train")
 
 max_iter_num = None if not sys.argv[2:] else int(sys.argv[2])
 
-os.makedirs(out_dir, exist_ok=True)
-
+# best eval paths
 context_encoder_path = os.path.join(out_dir, "context_encoder.pt")
 target_encoder_path = os.path.join(out_dir, "target_encoder.pt")
 predictor_path = os.path.join(out_dir, "predictor.pt")
 optimizer_path = os.path.join(out_dir, "optimizer.pt")
 train_run_state_path = os.path.join(out_dir, "train_run_state.pt")
+
+# train paths
+train_context_encoder_path = os.path.join(out_dir, "train", "context_encoder.pt")
+train_target_encoder_path = os.path.join(out_dir, "train", "target_encoder.pt")
+train_predictor_path = os.path.join(out_dir, "train", "predictor.pt")
+train_optimizer_path = os.path.join(out_dir, "train", "optimizer.pt")
+train_train_run_state_path = os.path.join(out_dir, "train", "train_run_state.pt")
+
+
 
 encoder_config_path = os.path.join(out_dir, "encoder_config.json")
 predictor_config_path = os.path.join(out_dir, "predictor_config.json")
@@ -172,6 +182,8 @@ if init_from == "scratch":
     if os.path.exists(out_dir):
         shutil.rmtree(out_dir)
     os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(train_out_dir, exist_ok=True)
+
 
     dataclass_to_json(encoder_config, encoder_config_path)
     dataclass_to_json(predictor_config, predictor_config_path)
@@ -188,13 +200,17 @@ elif init_from == "resume":
     target_encoder = Encoder(encoder_config)
     predictor = Predictor(predictor_config)
 
-    context_encoder.load_state_dict(torch.load(context_encoder_path))
-    target_encoder.load_state_dict(torch.load(target_encoder_path))
-    predictor.load_state_dict(torch.load(predictor_path))
+    resume_context_encoder_path = train_context_encoder_path if resume_from == "train" else context_encoder_path
+    resume_target_encoder_path = train_target_encoder_path if resume_from == "train" else target_encoder_path
+    resume_predictor_path = train_predictor_path if resume_from == "train" else predictor_path
+    resume_train_run_state_path = train_train_run_state_path if resume_from == "train" else train_run_state_path
+    
 
-    optimizer = torch.optim.AdamW(context_encoder.parameters())
+    context_encoder.load_state_dict(torch.load(resume_context_encoder_path))
+    target_encoder.load_state_dict(torch.load(resume_target_encoder_path))
+    predictor.load_state_dict(torch.load(resume_predictor_path))
 
-    train_run_data = torch.load(train_run_state_path)
+    train_run_data = torch.load(resume_train_run_state_path)
 
     # freeze target encoder
     for param in target_encoder.parameters():
@@ -285,7 +301,8 @@ weight_update_iter_num = iter_num // accumulation_steps
 
 optimizer = torch.optim.AdamW(param_groups)
 if init_from == "resume":
-    optimizer.load_state_dict(torch.load(optimizer_path))
+    resume_optimizer_path = train_optimizer_path if resume_from == "train" else optimizer_path
+    optimizer.load_state_dict(torch.load(resume_optimizer_path))
 
 lr_scheduler = WarmupCosineSchedule(
     optimizer,
@@ -329,6 +346,23 @@ def compute_jepa_loss(
         target_block_num = 3, 
         device = 'cpu'
     ):
+    """
+    
+    Parameters:
+    input_ids: torch.tensor of shape (batch_size, input_length) containing the (padded) input ids
+    input_attn_mask: torch.tensor of shape (batch_size, input_length) containing the input attention mask. 0s represent padding, 1s represent allowed inputs.
+    target_encoder: the target encoder
+    context_encoder: the context encoder
+    predictor: the predictor
+    max_target_mask_ratio: the maximum ratio of the input that can be used for targets
+    max_context_mask_ratio: the maximum ratio of the input that can be used for context
+    target_block_num: the number of target blocks to predict
+    device: the device to use for computation
+
+    Returns:
+    loss: the loss of the prediction
+    """
+
     
     batch_count = input_ids.shape[0]
     input_length = input_ids.shape[1]
@@ -474,38 +508,36 @@ while iter_num < max_iter_num:
         _new_wd = wd_scheduler.step()
         _new_m = ema_scheduler.step(context_encoder, target_encoder)
 
-        # print(target_block_start_indices)
-        # print(f'lr: {_new_lr}, wd: {_new_wd} m: {m} lss: {loss.item()} iter_num: {iter_num}')
+        train_loss = loss.item()
+        torch.save(context_encoder.state_dict(), train_context_encoder_path)
+        torch.save(target_encoder.state_dict(), train_target_encoder_path)
+        torch.save(predictor.state_dict(), train_predictor_path)
+        torch.save(optimizer.state_dict(), train_optimizer_path)
 
-        # best_loss = loss.item()
-        # torch.save(context_encoder.state_dict(), context_encoder_path)
-        # torch.save(target_encoder.state_dict(), target_encoder_path)
-        # torch.save(predictor.state_dict(), predictor_path)
-        # torch.save(optimizer.state_dict(), optimizer_path)
+        train_run_state = {
+                'iter_num': iter_num,
+                'epoch': epoch,
+                'batch_idx': batch_idx,
+                'loss': train_loss,
+                'batch_size': batch_size,
+                'torch_seed': torch.initial_seed(),
+                'lr': lr
+            }
 
-        # train_run_state = {
-        #         'iter_num': iter_num,
-        #         'epoch': epoch,
-        #         'batch_idx': batch_idx,
-        #         'loss': loss.item(),
-        #         'batch_size': batch_size,
-        #         'torch_seed': torch.initial_seed(),
-        #         'lr': lr
-        #     }
-
-        # torch.save(train_run_state, train_run_state_path)
-        with open(os.path.join(out_dir, 'losses.jsonl'), 'a') as f:
-            f.write(json.dumps({'loss': loss.item(), 'iter_num' : iter_num}) + '\n')
+        torch.save(train_run_state, train_train_run_state_path)
 
         if wandb_log:
             wandb.log({
-                'train/loss': loss.item(),
+                'train/loss': train_loss,
                 'lr': _new_lr,
                 'wd': _new_wd,
                 'm': _new_m,
                 # 'iter_num': iter_num
             }
             , step=iter_num)
+
+        with open(os.path.join(out_dir, 'losses.jsonl'), 'a') as f:
+            f.write(json.dumps({'loss': train_loss, 'iter_num' : iter_num}) + '\n')
 
 
     set_seed(random_seed + iter_num)
@@ -548,7 +580,7 @@ while iter_num < max_iter_num:
                     'iter_num': iter_num,
                     'epoch': epoch,
                     'batch_idx': batch_idx,
-                    'loss': loss.item(),
+                    'loss': mean_eval_loss,
                     'batch_size': batch_size,
                     'torch_seed': torch.initial_seed(),
                     'lr': lr
@@ -556,8 +588,6 @@ while iter_num < max_iter_num:
 
             torch.save(train_run_state, train_run_state_path)
 
-        with open(os.path.join(out_dir, 'val_losses.jsonl'), 'a') as f:
-            f.write(json.dumps({'loss': loss.item(), 'iter_num' : iter_num}) + '\n')
 
         if wandb_log:
             wandb.log({
