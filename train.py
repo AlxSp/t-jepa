@@ -81,9 +81,9 @@ class TrainRunConfig:
     random_seed: int = 42
 
 train_run_config = TrainRunConfig(
-    batch_size = 40,
-    accumulation_steps=4,
-    eval_interval=400,
+    batch_size = 64,
+    accumulation_steps=32,
+    eval_interval=1024,
     num_eval_batches = 200,
     max_iter_num=100,
     random_seed=42
@@ -165,6 +165,7 @@ num_eval_batches = train_run_config.num_eval_batches
 
 random_seed = train_run_config.random_seed
 
+grad_clip = 1.0
 
 
 #%%
@@ -498,7 +499,14 @@ while iter_num < max_iter_num:
     loss /= accumulation_steps
     scaler.scale(loss).backward()
 
+    # if the a full batch has been accumulated, update the model weights
     if (iter_num + 1) % accumulation_steps == 0:
+
+        if grad_clip != 0.0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(context_encoder.parameters(), grad_clip)
+            torch.nn.utils.clip_grad_norm_(predictor.parameters(), grad_clip)
+
         scaler.step(optimizer)
         scaler.update()
 
@@ -539,9 +547,9 @@ while iter_num < max_iter_num:
         with open(os.path.join(out_dir, 'losses.jsonl'), 'a') as f:
             f.write(json.dumps({'loss': train_loss, 'iter_num' : iter_num}) + '\n')
 
-
-    set_seed(random_seed + iter_num)
+    # if the eval interval has been reached, evaluate the model
     if iter_num % eval_interval == 0 and iter_num > 0:
+        set_seed(random_seed + iter_num)
         
         context_encoder.eval()
         predictor.eval()
@@ -554,7 +562,7 @@ while iter_num < max_iter_num:
 
                 tokenized = tokenizer(batch['text'], padding = True, truncation = False, max_length = 1024, return_tensors="pt")
                 with type_casting:
-                    loss = compute_jepa_loss(
+                    eval_loss = compute_jepa_loss(
                         tokenized['input_ids'], 
                         tokenized['attention_mask'], 
                         target_encoder, 
@@ -566,7 +574,7 @@ while iter_num < max_iter_num:
                         device = device
                     )
 
-                mean_eval_loss += loss.item() / num_eval_batches
+                mean_eval_loss += eval_loss.item() / num_eval_batches
 
 
         if mean_eval_loss < best_loss:
