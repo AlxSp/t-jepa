@@ -116,7 +116,7 @@ opt_config = OptimizerConfig(
 )
 
 #%%
-wandb_log = False
+wandb_log = True
 wandb_project = "t-jepa"
 wandb_run_name = "t-jepa"
 
@@ -236,7 +236,7 @@ tokenizer.pad_token = tokenizer.eos_token
 
 #%%
 #TODO: move to prep data script 
-dataset = load_from_disk('data/TinyStories').filter(lambda x: tokenizer(x['text'], return_tensors="pt")['input_ids'].shape[1] > 8, num_proc=12)
+dataset = load_from_disk('data/TinyStories').filter(lambda x: tokenizer(x['text'], return_tensors="pt", add_special_tokens = False)['input_ids'].shape[1] > 8, num_proc=12)
 
 #%%
 
@@ -383,26 +383,29 @@ def compute_jepa_loss(
     target_block_indices = torch.ones((batch_count, target_block_num, max_target_block_size), dtype = torch.long) # create a tensor to hold the indices of the target blocks
     target_block_indices = target_block_indices * target_block_start_indices.view((batch_count, target_block_num, 1)) # multiply the starting index of each target block by the full index tensor
     # for each sample add the indices of the target blocks to the tensor by applying a range to each row of the index tensors
-    for batch_idx in range(batch_count):
+    for batch_index in range(batch_count):
         # if the target block size is smaller than the max target block size, then the indices past the target block size will not be updated (they are handled by the attention mask)
-        target_block_indices[batch_idx, :, :target_block_sizes[batch_idx]] += torch.arange(target_block_sizes[batch_idx]).view(1, -1) # add the indices of the target blocks to the tensor
+        target_block_indices[batch_index, :, :target_block_sizes[batch_index]] += torch.arange(target_block_sizes[batch_index]).view(1, -1) # add the indices of the target blocks to the tensor
+    
+    # for target packing we flatten the target block indices to the shape of (batch_size, target_block_num * block_size)
+    target_block_indices = target_block_indices.view(batch_count, -1)
     # get the target blocks embeddings in the shape of (batch_size, target_block_num, block_size, embedding_size)
     target_blocks_embeddings = torch.stack([target_embeddings[index,target_block_range,:] for index, target_block_range in enumerate(target_block_indices)]) # get the target embeddings
 
     # make sure the target blocks embeddings are correctly selected
-    for index, sample_range in enumerate(target_block_indices):
+    for batch_index, sample_range in enumerate(target_block_indices):
         for jndex, _range in enumerate(sample_range):
-            assert torch.all(target_embeddings[index, _range, :] == target_blocks_embeddings[index, jndex, :]) # make sure the target blocks embeddings are correctly selected
+            assert torch.all(target_embeddings[batch_index, _range, :] == target_blocks_embeddings[batch_index, jndex, :]) # make sure the target blocks embeddings are correctly selected
     # target embeddings are arranged in 
-    # ((batch_sample_0, target_block_0, embedding_size),
-    # (batch_sample_0, target_block_1, embedding_size),
-    # (batch_sample_0, target_block_2, embedding_size), 
-    # etc.)
-
-
+    # ((batch_sample_0, target_block_0 + ... + target_block_n, embedding_size),
+    #  ...
+    # (batch_sample_n, target_block_0 + ... + target_block_n, embedding_size) 
+    # )
+            
+    # create boolean mask of allowed inputs in the context
     allowed_in_context = input_attn_mask.bool() # create a tensor of trues, representing the allowed inputs in the context
-    for index, target_block_range in enumerate(target_block_indices.view(batch_count, -1)):
-        allowed_in_context[index,target_block_range] = False # set the indices of the target blocks to false
+    for batch_index, target_block_range in enumerate(target_block_indices.view(batch_count, -1)):
+        allowed_in_context[batch_index,target_block_range] = False # set the indices of the target blocks to false
 
     # make sure all context blocks have the same length
     context_lengths = torch.sum(allowed_in_context, dim = 1) # get the context lengths
@@ -413,55 +416,60 @@ def compute_jepa_loss(
     context_attention_mask = torch.zeros((batch_count, max_context_length), dtype = torch.bool) # create a tensor of zeros for the context attention mask))
     context_blocks_indices = torch.zeros((batch_count, max_context_length), dtype = torch.long) # create a tensor of zeros for the context blocks indices
 
-    for index, allowed_context_length in enumerate(max_allowed_context_lengths): # for each sample
-        context_block_indices = torch.arange(0, input_length)[allowed_in_context[index]] # get the indices of the context inputs
+    for batch_index, allowed_context_length in enumerate(max_allowed_context_lengths): # for each sample
+        context_block_indices = torch.arange(0, input_length)[allowed_in_context[batch_index]] # get the indices of the context inputs
         perm = torch.randperm(context_block_indices.size(0)) # shuffle the indices
         idx = perm[:allowed_context_length] # select indices up to the smallest context length
         # context_blocks_indices.append(context_block_indices[idx]) # add the indices to the list
-        context_blocks_indices[index, :allowed_context_length] = context_block_indices[idx] # set the context blocks indices
-        context_inputs[index, :allowed_context_length] = input_ids[index, context_block_indices[idx]] # set the context inputs
-        context_attention_mask[index, :allowed_context_length] = True # set the attention mask to true for the context inputs
+        context_blocks_indices[batch_index, :allowed_context_length] = context_block_indices[idx] # set the context blocks indices
+        context_inputs[batch_index, :allowed_context_length] = input_ids[batch_index, context_block_indices[idx]] # set the context inputs
+        context_attention_mask[batch_index, :allowed_context_length] = True # set the attention mask to true for the context inputs
 
     # get the context blocks embeddings
     context_blocks_embeddings = context_encoder(context_inputs.to(device), id_indices=context_blocks_indices.to(device), attn_mask=context_attention_mask.unsqueeze(1).unsqueeze(1).to(device))
 
-    # create the prediction attention mask
-    prediction_input_size = max_context_length + max_target_block_size 
+    # create the prediction attention mask, which is the maximum context length + the maximum target block size * the number of target blocks
+    prediction_input_size = max_context_length + max_target_block_size * target_block_num 
     # add extra 0s to the context attention mask representing the target input attentions 
-    pred_context_attn_mask = torch.cat((context_attention_mask, torch.zeros((batch_count, max_target_block_size), dtype = torch.bool)), dim = 1)
-    # repeat the context attention mask for the prediction input size. We are doing it this way so that the target inputs only attend to the context inputs but no paddings
-    pred_context_attn_mask = pred_context_attn_mask.repeat(1,prediction_input_size)
-    # reshape the context attention mask to the correct attention matrix
-    pred_context_attn_mask = pred_context_attn_mask.view(batch_count, prediction_input_size,  prediction_input_size)
-    # create the target attention mask
-    pred_target_attn_mask = torch.zeros((batch_count, prediction_input_size), dtype = torch.bool)
-    # let the tokens in each target block attend to each other
-    for index, block_size in enumerate(target_block_sizes):
-        pred_target_attn_mask[index, max_context_length:max_context_length+block_size] = True
+    pred_context_attn_mask = torch.cat((context_attention_mask, torch.zeros((batch_count, max_target_block_size * target_block_num), dtype = torch.bool)), dim = 1)
 
-    # add the context and target attention masks together. The targets attend to the context and themselves, the context blocks only attend to themselves
-    prediction_attn_mask = pred_context_attn_mask + pred_target_attn_mask[:, None, :] * pred_target_attn_mask[:, :, None]
-    # we interleave the prediction attention mask
-    prediction_attn_mask = prediction_attn_mask.repeat_interleave(target_block_num, dim = 0)
+    # repeat the context attention mask for the prediction input size. We are doing it this way so that the target inputs only attend to the context inputs but no paddings
+    prediction_attn_mask = pred_context_attn_mask[:, None, :] * pred_context_attn_mask[:, :, None]
+
+    # let the inputs in each target block attend to each other but not the other target blocks
+    for batch_index, block_size in enumerate(target_block_sizes):
+        #for each target block, add the target attention mask to the prediction attention mask
+        for target_block_index in range(target_block_num):
+            # create the predictor target attention mask of the predictor's input size
+            pred_target_attn_mask = torch.zeros((prediction_input_size), dtype = torch.bool)
+            target_attn_start_index = max_context_length + target_block_index * max_target_block_size
+            pred_target_attn_mask[target_attn_start_index:target_attn_start_index+block_size] = True
+            # 1. multiply the context attention mask by the target attention mask to have the target inputs attend to the context inputs
+            # 2. multiply the target attention mask by itself to have the target inputs attend to each other
+            prediction_attn_mask[batch_index] += pred_context_attn_mask[batch_index, None, :] * pred_target_attn_mask[:, None] +  pred_target_attn_mask[None, :] * pred_target_attn_mask[:, None]
+
+    # if context inputs do not attend to atleast one other input, even if they are padding inputs, the transformer models will return nan values. We set the padding inputs to attend the context
+    for i in range(prediction_attn_mask.shape[0]):
+        ctx_len = torch.sum(prediction_attn_mask[i], dim = 1)[0]
+        prediction_attn_mask[i, :, :ctx_len] = True
 
     # predict target blocks from context blocks
     mask_token_embedding = predictor.get_mask_token_embedding()
-    # mask_toke_embeddings are the same so we can just repeat them
-    prediction_embeddings = mask_token_embedding.repeat(target_block_num * batch_count, max_target_block_size, 1) # for the number of target blocks, for the number of targets per block, repeat the mask token 
-    context_embeddings = context_blocks_embeddings.repeat_interleave(target_block_num, dim = 0) #.repeat(target_block_num, 1, 1) # for the number of target blocks, repeat the context embeddings
-    input_embeddings = torch.cat((context_embeddings, prediction_embeddings.to(device)), dim = 1) # concatenate the context and prediction embeddings
+    # mask_toke_embeddings are the same so we can just repeat them, the will only be differentiated by the position embeddings
+    prediction_embeddings = mask_token_embedding.repeat(batch_count, max_target_block_size * target_block_num, 1) # for the batch size, for the largest target block * number of targets per block, repeat the mask token 
 
-    input_indices = torch.cat((context_blocks_indices.repeat_interleave(target_block_num, dim = 0), target_block_indices.view(prediction_count, -1)), dim = 1) # concatenate the context and target indices
+    input_embeddings = torch.cat((context_blocks_embeddings, prediction_embeddings.to(device)), dim = 1) # concatenate the context and prediction embeddings
+
+    input_indices = torch.cat((context_blocks_indices, target_block_indices), dim = 1) # concatenate the context and target indices
 
     predicted_embeddings = predictor(input_embeddings, input_indices.to(device), attn_mask=prediction_attn_mask.unsqueeze(1).to(device)) # predict the target embeddings
 
-    _, context_length, _ = context_embeddings.shape
+    _, context_length, _ = context_blocks_embeddings.shape
     predicted_target_embeddings = predicted_embeddings[:,context_length:] # remove the context predictions
 
-    # for each sample in the batch, mask out the target blocks which are irrelevant
-    relevant_target_attn_mask = pred_target_attn_mask[:, context_length:].repeat_interleave(target_block_num, dim = 0).unsqueeze(2)
-
-    relevant_target_attn_mask = relevant_target_attn_mask.to(device)
+    # only attend to the embeddings of the predicted target blocks
+    relevant_target_attn_mask = torch.diagonal(prediction_attn_mask, dim1=1, dim2=2)
+    relevant_target_attn_mask = relevant_target_attn_mask[:, context_length:].unsqueeze(2).to(device)
 
     # compute the loss of the masked predictions
     loss = F.smooth_l1_loss(predicted_target_embeddings * relevant_target_attn_mask, target_blocks_embeddings.view(predicted_target_embeddings.shape) * relevant_target_attn_mask) # compute the loss
@@ -480,7 +488,7 @@ while iter_num < max_iter_num:
     with open(os.path.join(out_dir, 'batch.jsonl'), 'a') as f:
         f.write(json.dumps({'text': batch['text']}) + '\n')
 
-    tokenized = tokenizer(batch['text'], padding = True, truncation = False, max_length = 1024, return_tensors="pt")
+    tokenized = tokenizer(batch['text'], padding = True, truncation = False, max_length = 1024, return_tensors="pt", add_special_tokens = False)
     with type_casting:
         loss = compute_jepa_loss(
             tokenized['input_ids'], 
@@ -560,7 +568,7 @@ while iter_num < max_iter_num:
                 batch_idx = eval_iter % math.ceil(len(dataset["validation"]) / batch_size)
                 batch = get_batch('validation', batch_idx, min(batch_size, len(dataset["validation"]) - batch_idx * batch_size))
 
-                tokenized = tokenizer(batch['text'], padding = True, truncation = False, max_length = 1024, return_tensors="pt")
+                tokenized = tokenizer(batch['text'], padding = True, truncation = False, max_length = 1024, return_tensors="pt", add_special_tokens = False)
                 with type_casting:
                     eval_loss = compute_jepa_loss(
                         tokenized['input_ids'], 

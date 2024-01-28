@@ -2,8 +2,13 @@
 
 ## Setup (Local)
 
-Create a pyenv virtual environment with python 3.11
+install python 3.11 with pyenv
 
+```bash
+pyenv install 3.11
+```
+
+Create a pyenv virtual environment with python 3.11
 ```bash
 pyenv virtualenv 3.11 tjepa
 ```
@@ -29,6 +34,10 @@ pip install -r requirements.txt
 Install the rotary embeddings package
 
 ```bash
+git clone https://github.com/AlxSp/rotary-embedding-torch
+cd rotary-embedding-torch/
+git checkout indexing
+cd ..
 pip install -e ./rotary-embedding-torch
 ```
 
@@ -53,6 +62,12 @@ pip install -e ./rotary-embedding-torch
 # TinyStories
 
 max token length with LLaMa tokenizer: 1124
+
+```python
+import datasets
+dataset = load_dataset("roneneldan/TinyStories")
+dataset.save_to_disk("data/TinyStories")
+```
 
 ## Citations
 
