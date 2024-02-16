@@ -116,6 +116,11 @@ opt_config = OptimizerConfig(
 )
 
 #%%
+dataset_name = "TinyStories"
+dataset_dir = os.path.join("data", dataset_name)
+
+max_input_length = 1024
+#%%
 wandb_log = True
 wandb_project = "t-jepa"
 wandb_run_name = "t-jepa"
@@ -290,7 +295,10 @@ tokenizer.pad_token = tokenizer.eos_token
 
 #%%
 #TODO: move to prep data script 
-dataset = load_from_disk('data/TinyStories').filter(lambda x: tokenizer(x['text'], return_tensors="pt", add_special_tokens = False)['input_ids'].shape[1] > 8, num_proc=12)
+dataset = load_from_disk(dataset_dir)
+
+train_set_len = len(dataset['train'])
+val_set_len = len(dataset['validation'])
 
 #%%
 
@@ -298,7 +306,7 @@ dataset = load_from_disk('data/TinyStories').filter(lambda x: tokenizer(x['text'
 # init momentum scheduler
 ema = opt_config.ema
 bipe_scale = opt_config.bipe_scale
-batch_iterations_per_epoch = math.ceil(len(dataset['train']) / (batch_size * accumulation_steps)) # TODO: add .floor if the last batch should be dropped
+batch_iterations_per_epoch = math.ceil(train_set_len / (batch_size * accumulation_steps)) # TODO: add .floor if the last batch should be dropped
 num_epochs = opt_config.num_epochs
 final_lr = opt_config.final_lr
 final_wd = opt_config.final_weight_decay
@@ -348,7 +356,7 @@ param_groups = [
         }
     ]
 
-max_iter_num = math.ceil(len(dataset["train"]) / batch_size) if not max_iter_num else max_iter_num
+max_iter_num = math.ceil(train_set_len / batch_size) if not max_iter_num else max_iter_num
 iter_num = 0 if init_from == "scratch" else train_run_data['iter_num'] + 1
 assert iter_num % accumulation_steps == 0, 'iter_num must be divisible by accumulation_steps without remainder. May be loaded incorrectly from resume dir'
 assert eval_interval % accumulation_steps == 0, 'eval_interval must be divisible by accumulation_steps without remainder'
@@ -385,9 +393,21 @@ ema_scheduler = ExponentialMovingAverageSchedule(
 
 
 #%%
-def get_batch(split, index, batch_size):
+def get_batch(split, index, batch_size, tokenizer, max_length):
     data = dataset[split]
-    return data[index:index+batch_size]
+    samples = data[index:index+batch_size]
+    tokenized = tokenizer(samples['text'], padding = True, truncation = True, max_length = max_length, return_tensors="pt", add_special_tokens = False)
+
+    input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
+
+    if device_type == 'cuda':
+        input_ids = input_ids.pin_memory().to(device, non_blocking=True)
+        attention_mask = attention_mask.pin_memory().to(device, non_blocking=True)
+    else:
+        input_ids = input_ids.to(device)
+        attention_mask = attention_mask.to(device)
+    return input_ids, attention_mask
+
 
 #%%
 def collate_jepa_input_data(input_attn_mask, true_input_lengths, target_max_mask_ratio, target_mask_start_ratio, target_block_nums, context_max_mask_ratio):
@@ -521,7 +541,7 @@ def compute_jepa_loss(
     context_inputs = torch.gather(input_ids, 1, context_block_indices)
 
     # get the context blocks embeddings
-    context_blocks_embeddings = context_encoder(context_inputs.to(device), id_indices=context_block_indices.to(device), attn_mask=context_attn_mask.unsqueeze(1).unsqueeze(1).to(device))
+    context_blocks_embeddings = context_encoder(context_inputs.to(device), id_indices=context_block_indices, attn_mask=context_attn_mask.unsqueeze(1).unsqueeze(1).to(device))
 
     input_embeddings = torch.cat((context_blocks_embeddings, prediction_embeddings.to(device)), dim = 1) # concatenate the context and prediction embeddings
 
@@ -541,21 +561,22 @@ def compute_jepa_loss(
 
 #%%
 best_loss = 1e9
+pbar = tqdm(total=max_iter_num - iter_num)
 while iter_num < max_iter_num:
-    epoch = iter_num // len(dataset["train"])
+    epoch = iter_num // train_set_len
     
     set_seed(random_seed) #TODO: find better solution for reproducibility?
-    batch_idx = iter_num % math.ceil(len(dataset["train"]) / batch_size)
-    batch = get_batch('train', batch_idx, min(batch_size, len(dataset["train"]) - batch_idx * batch_size))
+    batch_idx = iter_num % math.ceil(train_set_len / batch_size)
+    input_ids, attention_mask = get_batch('train', batch_idx, min(batch_size, train_set_len - batch_idx * batch_size), tokenizer, max_input_length)
     
     # with open(os.path.join(out_dir, 'batch.jsonl'), 'a') as f:
     #     f.write(json.dumps({'text': batch['text']}) + '\n')
 
-    tokenized = tokenizer(batch['text'], padding = True, truncation = False, max_length = 1024, return_tensors="pt", add_special_tokens = False)
+    # tokenized = tokenizer(batch['text'], padding = True, truncation = False, max_length = 1024, return_tensors="pt", add_special_tokens = False)
 
-    target_embeddings = target_encoder(tokenized['input_ids'].to(device), attn_mask = tokenized['attention_mask'].unsqueeze(1).unsqueeze(1).bool().to(device)) # get target embeddings, no need to provide input indices.
+    target_embeddings = target_encoder(input_ids, attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()) # get target embeddings, no need to provide input indices.
 
-    true_input_lengths = torch.sum(tokenized['attention_mask'], dim = 1) # get the true input length for each sample
+    true_input_lengths = torch.sum(attention_mask, dim = 1).to('cpu') # get the true input length for each sample
 
     for strategy in target_masking_strategies:
         target_max_mask_ratio = strategy.get("target_max_mask_ratio", target_max_mask_ratio)
@@ -564,16 +585,16 @@ while iter_num < max_iter_num:
         target_block_nums = torch.where(target_block_nums < target_block_min_num, target_block_min_num, target_block_nums).int()
         target_mask_start_ratio = strategy.get("target_mask_start_ratio", 0.0)
 
-        target_block_indices, context_block_indices, context_attention_mask, prediction_input_indices, prediction_attn_mask = collate_jepa_input_data(tokenized['attention_mask'], true_input_lengths, target_max_mask_ratio, target_mask_start_ratio, target_block_nums, context_max_mask_ratio)
+        target_block_indices, context_block_indices, context_attention_mask, prediction_input_indices, prediction_attn_mask = collate_jepa_input_data(attention_mask.to('cpu'), true_input_lengths, target_max_mask_ratio, target_mask_start_ratio, target_block_nums, context_max_mask_ratio)
 
         with type_casting:
             loss = compute_jepa_loss(
                 context_encoder, 
                 predictor,
-                tokenized['input_ids'], 
+                input_ids, 
                 target_embeddings, 
                 target_block_indices, 
-                context_block_indices, 
+                context_block_indices.to(device), 
                 context_attention_mask, 
                 prediction_input_indices, 
                 prediction_attn_mask,
@@ -643,14 +664,15 @@ while iter_num < max_iter_num:
         mean_eval_loss = 0
         with torch.no_grad():
             for eval_iter in range(num_eval_batches):
-                batch_idx = eval_iter % math.ceil(len(dataset["validation"]) / batch_size)
-                batch = get_batch('validation', batch_idx, min(batch_size, len(dataset["validation"]) - batch_idx * batch_size))
+                batch_idx = eval_iter % math.ceil(val_set_len / batch_size)
+                # batch = get_batch('validation', batch_idx, min(batch_size, val_set_len) - batch_idx * batch_size))
+                input_ids, attention_mask = get_batch('train', batch_idx, min(batch_size, val_set_len - batch_idx * batch_size), tokenizer, max_input_length)
 
-                tokenized = tokenizer(batch['text'], padding = True, truncation = False, max_length = 1024, return_tensors="pt", add_special_tokens = False)
+                # tokenized = tokenizer(batch['text'], padding = True, truncation = False, max_length = 1024, return_tensors="pt", add_special_tokens = False)
 
-                target_embeddings = target_encoder(tokenized['input_ids'].to(device), attn_mask = tokenized['attention_mask'].unsqueeze(1).unsqueeze(1).bool().to(device)) # get target embeddings, no need to provide input indices.
+                target_embeddings = target_encoder(input_ids.to(device), attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool().to(device)) # get target embeddings, no need to provide input indices.
 
-                true_input_lengths = torch.sum(tokenized['attention_mask'], dim = 1) # get the true input length for each sample
+                true_input_lengths = torch.sum(attention_mask, dim = 1).to('cpu') # get the true input length for each sample
 
                 for strategy in target_masking_strategies:
                     target_max_mask_ratio = strategy.get("target_max_mask_ratio", target_max_mask_ratio)
@@ -660,35 +682,21 @@ while iter_num < max_iter_num:
                     
                     target_mask_start_ratio = strategy.get("target_mask_start_ratio", 0.0)
 
-                    target_block_indices, context_block_indices, context_attention_mask, prediction_input_indices, prediction_attn_mask = collate_jepa_input_data(tokenized['attention_mask'], true_input_lengths, target_max_mask_ratio, target_mask_start_ratio, target_block_nums, context_max_mask_ratio)
+                    target_block_indices, context_block_indices, context_attention_mask, prediction_input_indices, prediction_attn_mask = collate_jepa_input_data(attention_mask.to('cpu'), true_input_lengths, target_max_mask_ratio, target_mask_start_ratio, target_block_nums, context_max_mask_ratio)
 
                     with type_casting:
                         eval_loss = compute_jepa_loss(
                             context_encoder, 
                             predictor,
-                            tokenized['input_ids'], 
+                            input_ids, 
                             target_embeddings, 
                             target_block_indices, 
-                            context_block_indices, 
+                            context_block_indices.to(device), 
                             context_attention_mask, 
                             prediction_input_indices, 
                             prediction_attn_mask,
                             device = device
                         )
-
-                    # with type_casting:
-                    #     eval_loss = compute_jepa_loss(
-                    #         tokenized['input_ids'], 
-                    #         tokenized['attention_mask'], 
-                    #         target_encoder, 
-                    #         context_encoder, 
-                    #         predictor, 
-                    #         target_max_mask_ratio = target_max_mask_ratio, 
-                    #         target_mask_start_ratio = target_mask_start_ratio,
-                    #         context_max_mask_ratio = context_max_mask_ratio, 
-                    #         target_block_nums = torch.clamp(target_block_nums.int(),1), 
-                    #         device = device
-                    #     )
 
                     assert not torch.isnan(loss), 'loss is nan!'
 
@@ -730,6 +738,9 @@ while iter_num < max_iter_num:
         predictor.train()
 
     iter_num += 1
+    pbar.update(1)
+
+pbar.close()
 
 
 #%%

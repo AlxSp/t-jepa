@@ -52,10 +52,61 @@ pip install -e ./rotary-embedding-torch
 - [X] Ensure reproducibility
 - [X] Log training info
 - [X] Training runs
-- [ ] Double check loss function
-- [ ] Target Packing
-- [ ] UL2 targets
+- [X] Target Packing
+- [X] Mask out targets with reoccurring token sequences
+- [X] UL2 targets
+- [ ] Proper data prep script
+- [ ] Double check target context creation
 - [ ] Context/Input Packing
+
+# Target & Context masking strategies
+
+```python
+# R denoising
+{
+    "target_block_size_mean" : 3,
+    # "target_block_size_std" : 0.15,
+    "max_target_mask_ratio" : 0.25,
+    "target_block_num" : None,
+},
+{
+    "target_block_size_mean" : 8,
+    # "target_block_size_std" : 0.15,
+    "max_target_mask_ratio" : 0.25,
+    "target_block_num" : None,
+},
+# X denoising
+{
+    "target_block_size_mean" : 3,
+    # "target_block_size_std" : 0.5,
+    "max_target_mask_ratio" : 0.5,
+    "target_block_num" : None,
+},
+{
+    "target_block_size_mean" : 8,
+    # "target_block_size_std" : 0.5,
+    "max_target_mask_ratio" : 0.5,
+    "target_block_num" : None,
+},
+{
+    "target_block_size_mean" : 64,
+    # "target_block_size_std" : 0.5,
+    "max_target_mask_ratio" : 0.15,
+},
+{
+    "target_block_size_mean" : 64,
+    # "target_block_size_std" : 0.5,
+    "max_target_mask_ratio" : 0.5,
+},
+# S denoising
+{
+    "target_block_size_mean" : None,
+    # "target_block_size_std" : 0.5,
+    "max_target_mask_start_ratio" : 0.75,
+    "max_target_mask_ratio" : 0.25,
+    "target_block_num" : 1,
+}
+```
 
 ## Datasets
 
@@ -78,5 +129,16 @@ dataset.save_to_disk("data/TinyStories")
   journal={arXiv preprint arXiv:2301.08243},
   year={2023},
   github={https://github.com/facebookresearch/ijepa}
+}
+```
+
+```bibtex
+@misc{tay2023ul2,
+      title={UL2: Unifying Language Learning Paradigms}, 
+      author={Yi Tay and Mostafa Dehghani and Vinh Q. Tran and Xavier Garcia and Jason Wei and Xuezhi Wang and Hyung Won Chung and Siamak Shakeri and Dara Bahri and Tal Schuster and Huaixiu Steven Zheng and Denny Zhou and Neil Houlsby and Donald Metzler},
+      year={2023},
+      eprint={2205.05131},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL}
 }
 ```
