@@ -309,7 +309,7 @@ if wandb_log:
             'opt_config': opt_config.__dict__,
             'train_run_config': train_run_config.__dict__,
             'target_masking_strategies': target_masking_strategies,
-        }
+        },
         resume=True if init_from == "resume" else False
         )
 
