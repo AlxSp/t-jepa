@@ -57,18 +57,20 @@ encoder_config = EncoderConfig(
     n_layer = 8,
     n_head = 12,
     n_embd = 384,
+    rotary_n_embd = 32,
     dropout = 0.0,
     bias = True, # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better on small datasets
 )
 
 predictor_config = PredictorConfig(
-    n_layer = 4,
-    n_head = 8,
+    n_layer = 8,
+    n_head = 12,
     ext_n_embd = 384,
-    n_embd = 256,
+    n_embd = 384,
+    rotary_n_embd = 32,
     dropout = 0.0,
     bias = True, # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better on small datasets
-    trainable_mask_emb=False
+    trainable_mask_emb=True#False
 )
 
 @dataclass
@@ -81,8 +83,8 @@ class TrainRunConfig:
     random_seed: int = 42
 
 train_run_config = TrainRunConfig(
-    batch_size = 64,
-    accumulation_steps=32,
+    batch_size = 32,
+    accumulation_steps=64,
     eval_interval=1024,
     num_eval_batches = 200,
     max_iter_num=100,
@@ -95,24 +97,24 @@ class OptimizerConfig:
     num_epochs: int = 100
     ema: tuple[float, float] = (0.996, 1.0)
     bipe_scale: float = 1.0
-    final_lr: float = 1.0e-06
+    weight_decay: float = 0.04
     final_weight_decay: float = 0.4
+    warmup_steps: int = 0.025
     lr: float = 0.001
     start_lr: float = 0.0002
-    warmup: int = 40
-    weight_decay: float = 0.04
+    final_lr: float = 1.0e-06
 
 #%%
 opt_config = OptimizerConfig(
-    num_epochs = 100,
+    num_epochs = 1,
     ema = (0.996, 1.0),
-    bipe_scale = 1.0,
-    final_lr = 1.0e-06,
+    bipe_scale = 1.0, # batch iterations per epoch scale
+    weight_decay = 0.04,
     final_weight_decay = 0.4,
-    lr = 0.001,
+    warmup_steps = 0.025,
+    lr = 0.001, # 0.001
     start_lr = 0.0002,
-    warmup = 40,
-    weight_decay = 0.04
+    final_lr = 1.0e-06,
 )
 
 #%%
@@ -123,10 +125,12 @@ max_input_length = 1024
 #%%
 wandb_log = True
 wandb_project = "t-jepa"
-wandb_run_name = "t-jepa"
+wandb_run_name = "fixed_target_range" #-1_epoch
 
-init_from = "resume"
+# compile_model = True 
+
 init_from = "scratch"
+init_from = "resume"
 init_from = init_from if not sys.argv[1:] else sys.argv[1]
 resume_from = "train" # "train" or "best"
 
@@ -157,6 +161,7 @@ encoder_config_path = os.path.join(out_dir, "encoder_config.json")
 predictor_config_path = os.path.join(out_dir, "predictor_config.json")
 opt_config_path = os.path.join(out_dir, "opt_config.json")
 train_run_config_path = os.path.join(out_dir, "train_run_config.json")
+target_masking_strategies_path = os.path.join(out_dir, "target_masking_strategies.json")
 
 #%%
 #TODO: remove
@@ -164,6 +169,17 @@ context_max_mask_ratio = 0.8#1.0 # how much of the input should be included in t
 target_max_mask_ratio = .25# how much of the input should be used for targets
 target_block_max_num = 4
 target_block_min_num = 1 
+
+#%%
+@dataclass
+class TargetMaskingStrategy:
+    target_block_size: int | None = 8
+    target_block_size_mean: int | None = 8
+    target_block_size_std: float | None = 0.15
+    target_max_mask_ratio: float = 0.25
+    target_block_max_num: int | None = None
+    target_mask_start_ratio: float | None = 0.0
+    context_max_mask_ratio: float | None = 1.0
 
 #%%
 # new format
@@ -191,7 +207,7 @@ target_masking_strategies = [
     {
         "target_block_size_mean" : 8,
         # "target_block_size_std" : 0.5,
-        "target_max_mask_ratio" : 0.5,
+        "target_max_mask_ratio" : 0.8,
         "target_block_max_num" : None,
     },
     {
@@ -211,6 +227,7 @@ target_masking_strategies = [
         "target_mask_start_ratio" : 0.75,
         "target_max_mask_ratio" : 0.25,
         "target_block_max_num" : 1,
+        "context_max_mask_ratio" : 1.0,
     }
 
 ]
@@ -249,6 +266,9 @@ if init_from == "scratch":
     dataclass_to_json(predictor_config, predictor_config_path)
     dataclass_to_json(opt_config, opt_config_path)
     dataclass_to_json(train_run_config, train_run_config_path)
+    with open(target_masking_strategies_path, 'w') as f:
+        json.dump(target_masking_strategies, f, indent=2)
+
     
 elif init_from == "resume":
     encoder_config = json_to_dataclass(EncoderConfig, encoder_config_path)
@@ -279,12 +299,19 @@ elif init_from == "resume":
 #%%
 if wandb_log:
     import wandb
-    wandb.init(project=wandb_project, name=wandb_run_name, config={
-        'encoder_config': encoder_config.__dict__ | {"n_params": context_encoder.get_num_params()},
-        'predictor_config': predictor_config.__dict__ | {"n_params": predictor.get_num_params()},
-        'opt_config': opt_config.__dict__,
-        'train_run_config': train_run_config.__dict__
-    })
+    wandb.init(
+        project=wandb_project, 
+        name=wandb_run_name, 
+        config=
+            {
+            'encoder_config': encoder_config.__dict__ | {"n_params": context_encoder.get_num_params()},
+            'predictor_config': predictor_config.__dict__ | {"n_params": predictor.get_num_params()},
+            'opt_config': opt_config.__dict__,
+            'train_run_config': train_run_config.__dict__,
+            'target_masking_strategies': target_masking_strategies,
+        }
+        resume=True if init_from == "resume" else False
+        )
 
 # torch.backends.cudnn.deterministic = True
 # torch.backends.cudnn.benchmark = False
@@ -312,7 +339,7 @@ final_lr = opt_config.final_lr
 final_wd = opt_config.final_weight_decay
 lr = opt_config.lr
 start_lr = opt_config.start_lr
-warmup = opt_config.warmup
+warmup_steps = opt_config.warmup_steps
 wd = opt_config.weight_decay
 
 #%%
@@ -336,6 +363,14 @@ predictor.to(device)
 
 #%%
 
+
+
+max_iter_num = math.ceil(train_set_len / batch_size) if not max_iter_num else max_iter_num
+iter_num = 0 if init_from == "scratch" else train_run_data['iter_num'] + 1
+assert iter_num % accumulation_steps == 0, 'iter_num must be divisible by accumulation_steps without remainder. May be loaded incorrectly from resume dir'
+assert eval_interval % accumulation_steps == 0, 'eval_interval must be divisible by accumulation_steps without remainder'
+weight_update_iter_num = iter_num // accumulation_steps
+
 param_groups = [
         {
             'params': (p for n, p in context_encoder.named_parameters()
@@ -356,12 +391,6 @@ param_groups = [
         }
     ]
 
-max_iter_num = math.ceil(train_set_len / batch_size) if not max_iter_num else max_iter_num
-iter_num = 0 if init_from == "scratch" else train_run_data['iter_num'] + 1
-assert iter_num % accumulation_steps == 0, 'iter_num must be divisible by accumulation_steps without remainder. May be loaded incorrectly from resume dir'
-assert eval_interval % accumulation_steps == 0, 'eval_interval must be divisible by accumulation_steps without remainder'
-weight_update_iter_num = iter_num // accumulation_steps
-
 optimizer = torch.optim.AdamW(param_groups)
 if init_from == "resume":
     resume_optimizer_path = train_optimizer_path if resume_from == "train" else optimizer_path
@@ -369,7 +398,7 @@ if init_from == "resume":
 
 lr_scheduler = WarmupCosineSchedule(
     optimizer,
-    warmup_steps=int(warmup*batch_iterations_per_epoch),
+    warmup_steps=int(warmup_steps*batch_iterations_per_epoch),
     start_lr=start_lr,
     ref_lr=lr,
     final_lr=final_lr,
@@ -391,6 +420,11 @@ ema_scheduler = ExponentialMovingAverageSchedule(
     step=weight_update_iter_num
 )
 
+# FIXME: add support for compiled models, currently causes an error
+# if compile_model:
+#     target_encoder = torch.compile(target_encoder)
+#     context_encoder = torch.compile(context_encoder)
+#     predictor = torch.compile(predictor)
 
 #%%
 def get_batch(split, index, batch_size, tokenizer, max_length):
@@ -417,7 +451,7 @@ def collate_jepa_input_data(input_attn_mask, true_input_lengths, target_max_mask
     target_block_max_num = max(target_block_nums).ceil().int()  # get the maximum number of target blocks
     # block size computation  needs to be fixed, as blocks can overlap
     # Support varying block sizes for each sample
-    target_block_sizes = torch.clamp((true_input_lengths * target_max_mask_ratio // target_block_nums), 1).floor().int() # compute the target block sizes for each sample
+    target_block_sizes = torch.clamp((true_input_lengths * target_max_mask_ratio // target_block_nums), min = 1, max = strategy.get("target_block_size")).floor().int() # compute the target block sizes for each sample
     target_max_block_size = max(target_block_sizes).item() # get the maximum target block size
     target_min_start_indices = torch.clamp((true_input_lengths * target_mask_start_ratio).ceil().int(), 0) # compute the minimum starting index for the target blocks
 
@@ -425,11 +459,12 @@ def collate_jepa_input_data(input_attn_mask, true_input_lengths, target_max_mask
     # assert torch.all(target_min_start_indices + target_block_sizes == true_input_lengths)
     
     # we need to shrink the input value for randperm such that only n amount of possible start values can be selected
-    potential_start_indices_max = (true_input_lengths - target_min_start_indices) // target_block_sizes
-    assert torch.all(potential_start_indices_max > 0), "The target mask start ratio is too high, no target blocks can be created"
+    potential_start_indices_max = torch.clamp(true_input_lengths - target_min_start_indices - target_block_sizes, 1)
 
     # TODO: add feature to restrict min distance spacing between target blocks
     # set_seed(random_seed)
+
+    # max_target_block_distance = torch.max(target_block_sizes, dim = 1) - 1
 
     target_block_start_indices = torch.stack([
         torch.randperm(max_index).repeat((target_max_block_size * target_block_max_num / max_index).ceil().int())[:target_block_max_num] for max_index in potential_start_indices_max
@@ -461,18 +496,14 @@ def collate_jepa_input_data(input_attn_mask, true_input_lengths, target_max_mask
     # create boolean mask of allowed inputs in the context
     allowed_in_context = input_attn_mask.bool() # create a tensor of trues, representing the allowed inputs in the context
     for batch_index, target_block_range in enumerate(target_blocks_indices):
-        # view the target block ranges as a 2D tensor of shape (target_block_max_num, target_max_block_size)
-        target_block_range = target_block_range.view(target_block_max_num, -1)
         # get the relevant target block range for each sample which correspond to the number of target blocks and the target block size
-        relevant_target_block_range = target_block_range[:target_block_nums[batch_index], :target_block_sizes[batch_index]].reshape(-1)
-
-        # FIXME: only take ranges of blocks which are included 
+        relevant_target_block_range = target_block_range[:target_block_nums[batch_index] * target_block_sizes[batch_index]]
         allowed_in_context[batch_index,relevant_target_block_range] = False # set the indices of the target blocks to false
     
     # make sure all context blocks have the same length
     context_lengths = torch.sum(allowed_in_context, dim = 1) # get the context lengths
     assert torch.all(context_lengths > 0), "The context length is 0 for atleast one sample"
-    max_allowed_context_lengths = torch.clamp(context_lengths * context_max_mask_ratio, min = 1).int() # compute the max allowed context lengths
+    max_allowed_context_lengths = torch.min(context_lengths, torch.clamp(true_input_lengths * context_max_mask_ratio, min = 1).int()) # compute the max allowed context lengths
     max_context_length = torch.max(max_allowed_context_lengths) # get the max allowed context length
 
     # context_inputs = torch.zeros((batch_count, max_context_length), dtype = torch.long) # create a tensor of zeros for the context inputs
@@ -555,11 +586,23 @@ def compute_jepa_loss(
     relevant_target_attn_mask = relevant_target_attn_mask[:, context_length:].unsqueeze(2).to(device)
 
     # compute the loss of the masked predictions
-    loss = F.smooth_l1_loss(predicted_target_embeddings * relevant_target_attn_mask, target_blocks_embeddings.view(predicted_target_embeddings.shape) * relevant_target_attn_mask) # compute the loss
+    embedding_losses = F.smooth_l1_loss(predicted_target_embeddings, target_blocks_embeddings.view(predicted_target_embeddings.shape), reduction='none') # compute the loss
+
+    # mask the losses
+    masked_embedding_losses = embedding_losses * relevant_target_attn_mask
+
+    # compute the loss
+    loss = torch.sum(masked_embedding_losses) / torch.sum(relevant_target_attn_mask)
 
     return loss    
 
+# def get_target_block_embeddings(target_embeddings, target_block_indices):
+#     return torch.stack([target_embeddings[index,target_block_range,:] for index, target_block_range in enumerate(target_block_indices)]) # get the target embeddings
+
+# def get_context_blocks_embeddings()
+
 #%%
+total_inputs_seen = 0 if init_from == "scratch" else train_run_data['total_inputs_seen']
 best_loss = 1e9
 pbar = tqdm(total=max_iter_num - iter_num)
 while iter_num < max_iter_num:
@@ -571,17 +614,17 @@ while iter_num < max_iter_num:
     
     # with open(os.path.join(out_dir, 'batch.jsonl'), 'a') as f:
     #     f.write(json.dumps({'text': batch['text']}) + '\n')
-
-    # tokenized = tokenizer(batch['text'], padding = True, truncation = False, max_length = 1024, return_tensors="pt", add_special_tokens = False)
-
-    target_embeddings = target_encoder(input_ids, attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()) # get target embeddings, no need to provide input indices.
+    with torch.no_grad():
+        target_embeddings = target_encoder(input_ids, attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()) # get target embeddings, no need to provide input indices.
+        target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
 
     true_input_lengths = torch.sum(attention_mask, dim = 1).to('cpu') # get the true input length for each sample
 
+    train_loss = 0
     for strategy in target_masking_strategies:
         target_max_mask_ratio = strategy.get("target_max_mask_ratio", target_max_mask_ratio)
         context_max_mask_ratio = strategy.get("context_max_mask_ratio", context_max_mask_ratio)
-        target_block_nums = torch.tensor([strategy.get("target_block_max_num")] * len(true_input_lengths)) if strategy.get("target_block_max_num") is not None else true_input_lengths * target_max_mask_ratio // strategy.get("target_block_size_mean", 1)
+        target_block_nums = torch.tensor([strategy.get("target_block_max_num")] * len(true_input_lengths)) if strategy.get("target_block_max_num") is not None else true_input_lengths * target_max_mask_ratio // strategy.get("target_block_size", 1)
         target_block_nums = torch.where(target_block_nums < target_block_min_num, target_block_min_num, target_block_nums).int()
         target_mask_start_ratio = strategy.get("target_mask_start_ratio", 0.0)
 
@@ -605,6 +648,9 @@ while iter_num < max_iter_num:
 
         loss /= accumulation_steps
         scaler.scale(loss).backward()
+        train_loss += loss.item()
+
+    total_inputs_seen += sum(true_input_lengths)
 
     # if the a full batch has been accumulated, update the model weights
     if (iter_num + 1) % accumulation_steps == 0:
@@ -623,7 +669,7 @@ while iter_num < max_iter_num:
         _new_wd = wd_scheduler.step()
         _new_m = ema_scheduler.step(context_encoder, target_encoder)
 
-        train_loss = loss.item()
+        # train_loss = loss.item()
         torch.save(context_encoder.state_dict(), train_context_encoder_path)
         torch.save(target_encoder.state_dict(), train_target_encoder_path)
         torch.save(predictor.state_dict(), train_predictor_path)
@@ -631,10 +677,12 @@ while iter_num < max_iter_num:
 
         train_run_state = {
                 'iter_num': iter_num,
+                'total_inputs_seen' : total_inputs_seen,
                 'epoch': epoch,
                 'batch_idx': batch_idx,
                 'loss': train_loss,
                 'batch_size': batch_size,
+                'accumulation_steps': accumulation_steps,
                 'torch_seed': torch.initial_seed(),
                 'lr': lr
             }
@@ -649,7 +697,7 @@ while iter_num < max_iter_num:
                 'm': _new_m,
                 # 'iter_num': iter_num
             }
-            , step=iter_num)
+            , step=iter_num * batch_size) #FIXME iter_num is not well defined, maybe use number of inputs seen?
 
         # with open(os.path.join(out_dir, 'losses.jsonl'), 'a') as f:
         #     f.write(json.dumps({'loss': train_loss, 'iter_num' : iter_num}) + '\n')
@@ -665,15 +713,14 @@ while iter_num < max_iter_num:
         with torch.no_grad():
             for eval_iter in range(num_eval_batches):
                 batch_idx = eval_iter % math.ceil(val_set_len / batch_size)
-                # batch = get_batch('validation', batch_idx, min(batch_size, val_set_len) - batch_idx * batch_size))
                 input_ids, attention_mask = get_batch('train', batch_idx, min(batch_size, val_set_len - batch_idx * batch_size), tokenizer, max_input_length)
 
-                # tokenized = tokenizer(batch['text'], padding = True, truncation = False, max_length = 1024, return_tensors="pt", add_special_tokens = False)
 
                 target_embeddings = target_encoder(input_ids.to(device), attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool().to(device)) # get target embeddings, no need to provide input indices.
 
                 true_input_lengths = torch.sum(attention_mask, dim = 1).to('cpu') # get the true input length for each sample
 
+                eval_loss = 0
                 for strategy in target_masking_strategies:
                     target_max_mask_ratio = strategy.get("target_max_mask_ratio", target_max_mask_ratio)
                     context_max_mask_ratio = strategy.get("context_max_mask_ratio", context_max_mask_ratio)
@@ -685,7 +732,7 @@ while iter_num < max_iter_num:
                     target_block_indices, context_block_indices, context_attention_mask, prediction_input_indices, prediction_attn_mask = collate_jepa_input_data(attention_mask.to('cpu'), true_input_lengths, target_max_mask_ratio, target_mask_start_ratio, target_block_nums, context_max_mask_ratio)
 
                     with type_casting:
-                        eval_loss = compute_jepa_loss(
+                        loss = compute_jepa_loss(
                             context_encoder, 
                             predictor,
                             input_ids, 
@@ -700,6 +747,8 @@ while iter_num < max_iter_num:
 
                     assert not torch.isnan(loss), 'loss is nan!'
 
+                    eval_loss += loss.item()
+
                 mean_eval_loss += eval_loss.item() / num_eval_batches
 
 
@@ -712,10 +761,12 @@ while iter_num < max_iter_num:
 
             train_run_state = {
                     'iter_num': iter_num,
+                    'total_inputs_seen' : total_inputs_seen,
                     'epoch': epoch,
                     'batch_idx': batch_idx,
                     'loss': mean_eval_loss,
                     'batch_size': batch_size,
+                    'accumulation_steps': accumulation_steps,
                     'torch_seed': torch.initial_seed(),
                     'lr': lr
                 }
@@ -732,7 +783,7 @@ while iter_num < max_iter_num:
                 # 'm': _new_m,
                 # 'iter_num': iter_num
             }
-            , step=iter_num)
+            , step=iter_num * batch_size) #FIXME iter_num is not well defined, maybe use number of inputs seen?
 
         context_encoder.train()
         predictor.train()

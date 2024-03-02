@@ -1,5 +1,8 @@
+#ignore stored datasets
 data/*
+# but the python files that prepare the data should be tracked
 !data/*.py
+
 out/
 wandb/
 

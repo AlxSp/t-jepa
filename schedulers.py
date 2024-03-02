@@ -19,7 +19,7 @@ class WarmupCosineSchedule:
         ref_lr,
         T_max,
         final_lr=0.,
-        step = 0.
+        step = 0
     ):
         self.optimizer = optimizer
         self.start_lr = start_lr
@@ -54,7 +54,7 @@ class CosineWDSchedule:
         ref_wd,
         T_max,
         final_wd=0.,
-        step = 0.
+        step = 0
     ):
         self.optimizer = optimizer
         self.ref_wd = ref_wd
@@ -79,7 +79,7 @@ class CosineWDSchedule:
         return new_wd
 
 class ExponentialMovingAverageSchedule:
-    def __init__(self, momentum, T_max, step = 0.):
+    def __init__(self, momentum, T_max, step = 0):
 
         self.momentum = momentum
         self.T_max = T_max
@@ -89,8 +89,8 @@ class ExponentialMovingAverageSchedule:
     def step(self, source_model, target_model):
         momentum = self.momentum + self.current_step / self.T_max * (1.0 - self.momentum) 
 
-        for param_q, param_k in zip(source_model.parameters(), target_model.parameters()):
-            param_k.data.mul_(momentum).add_((1.0 - momentum) * param_q.detach().data)
+        for param_s, param_t in zip(source_model.parameters(), target_model.parameters()):
+            param_t.data.mul_(momentum).add_((1.0 - momentum) * param_s.detach().data)
 
         self.current_step += 1
         return momentum
