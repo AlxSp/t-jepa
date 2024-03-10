@@ -84,10 +84,4 @@ assert not torch.allclose(rq[:,:,mod_index_ranges], i_rq_off), 'rotary embedding
 assert not torch.allclose(rq, i_rq_2), 'rotary embeddings should be different when indices are different'
 
 
-#%%
-i_rq_2[:,:,783]
 
-#%%
-rq[:,:,0]
-
-#%%

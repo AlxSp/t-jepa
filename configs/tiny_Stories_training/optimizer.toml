@@ -1,0 +1,9 @@
+num_epochs = 1
+ema = [0.996, 1.0] # (ema decay, ema end value) exponential moving average of teacher model
+bipe_scale = 1.0 # batch iterations per epoch scale
+weight_decay = 0.04
+final_weight_decay = 0.4
+warmup_steps = 0.025
+lr = 0.001
+start_lr = 0.0002
+final_lr = 1.0e-06

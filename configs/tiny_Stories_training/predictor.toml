@@ -1,0 +1,8 @@
+n_layer = 8
+n_head = 12
+ext_n_embd = 384
+n_embd = 384
+rotary_n_embd = 32
+dropout = 0.0
+bias = true #  bias in Linears and LayerNorms like GPT-2. False: a bit better on small datasets
+trainable_mask_emb=true # wether to train the mask embeddings

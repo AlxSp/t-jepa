@@ -1,0 +1,6 @@
+batch_size = 32 # number of samples in a batch for a device
+accumulation_steps=64 # number of steps before backprop
+eval_interval=1024 # number of steps before evaluation
+num_eval_batches = 200 # number of batches to evaluate
+# max_iter_num=100 # optional: number of iterations to train
+random_seed=42 # random seed
