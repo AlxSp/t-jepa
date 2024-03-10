@@ -1,0 +1,8 @@
+{
+  "batch_size": 32,
+  "accumulation_steps": 64,
+  "eval_interval": 1024,
+  "num_eval_batches": 200,
+  "max_iter_num": null,
+  "random_seed": 42
+}
