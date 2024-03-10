@@ -157,7 +157,6 @@ class Encoder(nn.Module):
         params are actually used as weights in the final layer, so we include them.
         """
         n_params = sum(p.numel() for p in self.parameters())
-
         return n_params
 
     def _init_weights(self, module):
@@ -247,7 +246,6 @@ class Predictor(nn.Module):
         params are actually used as weights in the final layer, so we include them.
         """
         n_params = sum(p.numel() for p in self.parameters())
-
         return n_params
 
     def _init_weights(self, module):
@@ -290,6 +288,103 @@ class Predictor(nn.Module):
         mfu = flops_achieved / flops_promised
         return mfu
 
+@dataclass
+class PredictionDecoderConfig:
+    vocab_size: int = 50304
+
+    n_layer: int = 12
+    n_head: int = 12
+
+    ext_n_embd: int = 768 # embedding dimensionality of the input
+    n_embd: int = 768
+    rotary_n_embd: int = 32
+    
+    dropout: float = 0.0
+    bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better
+
+
+class PredictionDecoder(nn.Module):
+    """
+    Uses the generated embeddings from the predictor to generate tokens
+    """
+    def __init__(self, config):
+        super().__init__()
+        # assert config.vocab_size is not None
+        # assert config.block_size is not None
+        self.config = config
+
+        self.rotary_embedding = RotaryEmbedding(config.rotary_n_embd)
+
+        self.in_proj = nn.Identity() if config.ext_n_embd == config.n_embd else nn.Linear(config.ext_n_embd, config.n_embd, bias=config.bias)
+        self.out_proj = nn.Identity() if config.ext_n_embd == config.n_embd else nn.Linear(config.n_embd, config.ext_n_embd, bias=config.bias)
+
+        self.transformer = nn.ModuleDict(dict(
+            # wte = nn.Embedding(config.vocab_size, config.n_embd),
+            # wpe = nn.Embedding(config.block_size, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+        ))
+
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
+    def get_num_params(self, non_embedding=True):
+        """
+        Return the number of parameters in the model.
+        For non-embedding count (default), the position embeddings get subtracted.
+        The token embeddings would too, except due to the parameter sharing these
+        params are actually used as weights in the final layer, so we include them.
+        """
+        n_params = sum(p.numel() for p in self.parameters())
+        # if non_embedding:
+        #     n_params -= self.transformer.wpe.weight.numel()
+        return n_params
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def estimate_mfu(self, fwdbwd_per_iter, dt):
+        """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
+        # first estimate the number of flops we do per iteration.
+        # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
+        N = self.get_num_params()
+        cfg = self.config
+        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd//cfg.n_head, cfg.block_size
+        flops_per_token = 6*N + 12*L*H*Q*T
+        flops_per_fwdbwd = flops_per_token * T
+        flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
+        # express our flops throughput as ratio of A100 bfloat16 peak flops
+        flops_achieved = flops_per_iter * (1.0/dt) # per second
+        flops_promised = 312e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS
+        mfu = flops_achieved / flops_promised
+        return mfu
+    
+    def forward(self, embeddings, id_indices=None, attn_mask=None):
+        assert embeddings.shape[-1] == self.config.ext_n_embd, f"bad number of dimensions in input embedding {embeddings.shape}, expected {self.config.ext_n_embd}"
+
+        x = self.in_proj(embeddings)
+        x = self.transformer.drop(x)
+        for block in self.transformer.h:
+            x = block(x, self.rotary_embedding, id_indices, attn_mask)
+        x = self.transformer.ln_f(x)
+        
+        logits = self.lm_head(x)
+
+        return logits
 
 if __name__ == "__main__":
     config = EncoderConfig(

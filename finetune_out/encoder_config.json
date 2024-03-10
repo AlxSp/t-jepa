@@ -1,0 +1,10 @@
+{
+  "block_size": 1024,
+  "vocab_size": 32000,
+  "n_layer": 8,
+  "n_head": 12,
+  "n_embd": 384,
+  "rotary_n_embd": 32,
+  "dropout": 0.0,
+  "bias": true
+}

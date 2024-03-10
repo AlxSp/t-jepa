@@ -8,11 +8,12 @@ import json
 import toml
 import random
 import shutil
+import sys
 import numpy as np
 from torch.utils.data import DataLoader
 from contextlib import nullcontext
 from schedulers import CosineWDSchedule, ExponentialMovingAverageSchedule, WarmupCosineSchedule
-from models import Encoder, EncoderConfig, Predictor, PredictorConfig
+from models import Encoder, EncoderConfig, PredictionDecoder, PredictionDecoderConfig, Predictor, PredictorConfig
 from transformers import LlamaTokenizer
 from datasets import load_from_disk
 from tqdm import tqdm
@@ -25,6 +26,7 @@ parser = ArgumentParser(description='')
 parser.add_argument('--init_from', type=str, required=False, choices=['scratch', 'resume'], help='init from scratch or resume')
 parser.add_argument('--encoder_config_path', type=str, required=False, help='path to the encoder config')
 parser.add_argument('--predictor_config_path', type=str, required=False, help='path to the predictor config')
+parser.add_argument('--decoder_config_path', type=str, required=False, help='path to the decoder config')
 parser.add_argument('--opt_config_path', type=str, required=False, help='path to the optimizer config')
 parser.add_argument('--train_run_config_path', type=str, required=False, help='path to the train run config')
 parser.add_argument('--target_masking_strategies_path', type=str, required=False, help='path to the target masking strategies')
@@ -88,6 +90,17 @@ predictor_config = PredictorConfig(
     trainable_mask_emb=True#False
 ) if not args.predictor_config_path else toml_to_dataclass(PredictorConfig, args.predictor_config_path)
 
+decoder_config = PredictionDecoderConfig(
+    vocab_size=32000,
+    n_layer = 4,
+    n_head = 12,
+    ext_n_embd = 384,
+    n_embd = 384,
+    rotary_n_embd = 32,
+    dropout = 0.0,
+    bias = True, # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better on small datasets
+) if not args.decoder_config_path else toml_to_dataclass(PredictionDecoderConfig, args.decoder_config_path)
+
 @dataclass
 class TrainRunConfig:
     batch_size: int = 40
@@ -138,17 +151,6 @@ context_max_mask_ratio = 0.8#1.0 # how much of the input should be included in t
 target_max_mask_ratio = .25# how much of the input should be used for targets
 target_block_max_num = 4
 target_block_min_num = 1 
-
-#%%
-# @dataclass
-# class TargetMaskingStrategy:
-#     target_block_size: int | None = 8
-#     target_block_size_mean: int | None = 8
-#     target_block_size_std: float | None = 0.15
-#     target_max_mask_ratio: float = 0.25
-#     target_block_max_num: int | None = None
-#     target_mask_start_ratio: float | None = 0.0
-#     context_max_mask_ratio: float | None = 1.0
 
 #%%
 # new format
@@ -210,19 +212,19 @@ dataset_dir = os.path.join("data", dataset_name)
 max_input_length = 1024
 #%%
 wandb_log = True
-wandb_project = "t-jepa"
-wandb_run_name = "fixed_target_range" #-1_epoch
+wandb_project = "t-jepa-finetune"
+wandb_run_name = "gen" #-1_epoch
 
 # compile_model = True 
 
-init_from = "scratch"
 init_from = "resume"
+init_from = "scratch"
 init_from = init_from if not args.init_from else args.init_from
 resume_from = "train" # "train" or "best"
 
 print(f"init from: {init_from}")
 
-out_dir = "out" if not args.output_dir else args.output_dir
+out_dir = "finetune_out" if not args.output_dir else args.output_dir
 train_out_dir = os.path.join(out_dir, "train")
 
 max_iter_num = None
@@ -231,6 +233,7 @@ max_iter_num = None
 context_encoder_path = os.path.join(out_dir, "context_encoder.pt")
 target_encoder_path = os.path.join(out_dir, "target_encoder.pt")
 predictor_path = os.path.join(out_dir, "predictor.pt")
+decoder_path = os.path.join(out_dir, "decoder.pt")
 optimizer_path = os.path.join(out_dir, "optimizer.pt")
 train_run_state_path = os.path.join(out_dir, "train_run_state.pt")
 
@@ -238,6 +241,7 @@ train_run_state_path = os.path.join(out_dir, "train_run_state.pt")
 train_context_encoder_path = os.path.join(out_dir, "train", "context_encoder.pt")
 train_target_encoder_path = os.path.join(out_dir, "train", "target_encoder.pt")
 train_predictor_path = os.path.join(out_dir, "train", "predictor.pt")
+train_decoder_path = os.path.join(out_dir, "train", "decoder.pt")
 train_optimizer_path = os.path.join(out_dir, "train", "optimizer.pt")
 train_train_run_state_path = os.path.join(out_dir, "train", "train_run_state.pt")
 
@@ -263,17 +267,28 @@ random_seed = train_run_config.random_seed
 grad_clip = 1.0
 
 
+trained_context_encoder_path = os.path.join("out", "context_encoder.pt")
+trained_predictor_path = os.path.join("out", "predictor.pt")
+
 #%%
 if init_from == "scratch":
     set_seed(random_seed)
 
     context_encoder = Encoder(encoder_config) # initialize context encoder
-    target_encoder = copy.deepcopy(context_encoder) # create target encoder as a copy of context encoder
-    # freeze target encoder
-    for param in target_encoder.parameters():
+    predictor = Predictor(predictor_config) # initialize predictor
+    
+    #FIXME: add path from original training
+    context_encoder.load_state_dict(torch.load(trained_context_encoder_path))
+    predictor.load_state_dict(torch.load(trained_predictor_path))
+
+    # freeze context and predictor
+    for param in context_encoder.parameters():
         param.requires_grad = False
 
-    predictor = Predictor(predictor_config) # initialize predictor
+    for param in context_encoder.parameters():
+        param.requires_grad = False
+
+    decoder = PredictionDecoder(decoder_config) # initialize decoder
 
     if os.path.exists(out_dir):
         shutil.rmtree(out_dir)
@@ -299,8 +314,8 @@ elif init_from == "resume":
 
 
     context_encoder = Encoder(encoder_config)
-    target_encoder = Encoder(encoder_config)
     predictor = Predictor(predictor_config)
+    decoder = PredictionDecoder(decoder_config)
 
     resume_context_encoder_path = train_context_encoder_path if resume_from == "train" else context_encoder_path
     resume_target_encoder_path = train_target_encoder_path if resume_from == "train" else target_encoder_path
@@ -309,13 +324,15 @@ elif init_from == "resume":
     
 
     context_encoder.load_state_dict(torch.load(resume_context_encoder_path))
-    target_encoder.load_state_dict(torch.load(resume_target_encoder_path))
     predictor.load_state_dict(torch.load(resume_predictor_path))
 
     train_run_data = torch.load(resume_train_run_state_path)
 
-    # freeze target encoder
-    for param in target_encoder.parameters():
+    # freeze context and predictor
+    for param in context_encoder.parameters():
+        param.requires_grad = False
+
+    for param in context_encoder.parameters():
         param.requires_grad = False
 
 #%%
@@ -335,14 +352,10 @@ if wandb_log:
         resume=True if init_from == "resume" else False
         )
 
-# torch.backends.cudnn.deterministic = True
-# torch.backends.cudnn.benchmark = False
-
 #%%
 tokenizer = LlamaTokenizer.from_pretrained('llama_tokenizer', use_fast = False) # initialize tokenizer
 tokenizer.pad_token = tokenizer.eos_token
 
-print(tokenizer.vocab_size)
 #%%
 #TODO: move to prep data script 
 dataset = load_from_disk(dataset_dir)
@@ -381,8 +394,8 @@ scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 #%%
 # load the models to the device
 context_encoder.to(device)
-target_encoder.to(device)
 predictor.to(device)
+decoder.to(device)
 
 #%%
 
@@ -396,18 +409,10 @@ weight_update_iter_num = iter_num // accumulation_steps
 
 param_groups = [
         {
-            'params': (p for n, p in context_encoder.named_parameters()
+            'params': (p for n, p in decoder.named_parameters()
                        if ('bias' not in n) and (len(p.shape) != 1))
-        }, {
-            'params': (p for n, p in predictor.named_parameters()
-                       if ('bias' not in n) and (len(p.shape) != 1))
-        }, {
-            'params': (p for n, p in context_encoder.named_parameters()
-                       if ('bias' in n) or (len(p.shape) == 1)),
-            'WD_exclude': True,
-            'weight_decay': 0
-        }, {
-            'params': (p for n, p in predictor.named_parameters()
+        },{
+            'params': (p for n, p in decoder.named_parameters()
                        if ('bias' in n) or (len(p.shape) == 1)),
             'WD_exclude': True,
             'weight_decay': 0
@@ -437,11 +442,11 @@ wd_scheduler = CosineWDSchedule(
     step=weight_update_iter_num
 )
 
-ema_scheduler = ExponentialMovingAverageSchedule(
-    momentum=ema[0],
-    T_max=int(bipe_scale*num_epochs*batch_iterations_per_epoch),
-    step=weight_update_iter_num
-)
+# ema_scheduler = ExponentialMovingAverageSchedule(
+#     momentum=ema[0],
+#     T_max=int(bipe_scale*num_epochs*batch_iterations_per_epoch),
+#     step=weight_update_iter_num
+# )
 
 # FIXME: add support for compiled models, currently causes an error
 # if compile_model:
@@ -578,11 +583,11 @@ def collate_jepa_input_data(input_attn_mask, true_input_lengths, target_max_mask
     return target_blocks_indices, context_blocks_indices, context_attn_mask, predictor_input_indices, predictor_attn_mask
 
 #%%
-def compute_jepa_loss(
+def compute_ce_loss(
         context_encoder, 
         predictor,
-        input_ids, 
-        target_embeddings, 
+        decoder,
+        input_ids,
         target_block_indices, 
         context_block_indices, 
         context_attn_mask, 
@@ -592,7 +597,7 @@ def compute_jepa_loss(
     ):
     batch_count = input_ids.shape[0]
 
-    target_blocks_embeddings = torch.stack([target_embeddings[index,target_block_range,:] for index, target_block_range in enumerate(target_block_indices)]) # get the target embeddings
+    # target_blocks_embeddings = torch.stack([target_embeddings[index,target_block_range,:] for index, target_block_range in enumerate(target_block_indices)]) # get the target embeddings
 
     # predict target blocks from context blocks
     mask_token_embedding = predictor.get_mask_token_embedding()
@@ -611,15 +616,27 @@ def compute_jepa_loss(
     _, context_length, _ = context_blocks_embeddings.shape
     predicted_target_embeddings = predicted_embeddings[:,context_length:] # remove the context predictions
 
+    prediction_attn_mask = prediction_attn_mask[:, context_length:, context_length:] # remove the context attention mask
+    # add ones along the diagonal so each input attends to at least one other input
+    decoder_attn_mask = torch.diag_embed(prediction_attn_mask, 
+
+    assert torch.equal(decoder_attn_mask, prediction_attn_mask)
+
+    out = decoder(predicted_target_embeddings, prediction_input_indices[:,context_length:].to(device), attn_mask=prediction_attn_mask[:, context_length:, context_length:].unsqueeze(1).to(device))
+
+    targets = torch.gather(input_ids, 1, target_block_indices.to(device))
+
+    logits_loss = F.cross_entropy(out.view(-1, out.shape[-1]), targets.view(-1), ignore_index=tokenizer.pad_token_id, reduction='none')
+
     # only attend to the embeddings of the predicted target blocks
     relevant_target_attn_mask = torch.diagonal(prediction_attn_mask, dim1=1, dim2=2)
     relevant_target_attn_mask = relevant_target_attn_mask[:, context_length:].unsqueeze(2).to(device)
 
     # compute the loss of the masked predictions
-    embedding_losses = F.smooth_l1_loss(predicted_target_embeddings, target_blocks_embeddings.view(predicted_target_embeddings.shape), reduction='none') # compute the loss
+    # embedding_losses = F.smooth_l1_loss(predicted_target_embeddings, target_blocks_embeddings.view(predicted_target_embeddings.shape), reduction='none') # compute the loss
 
     # mask the losses
-    masked_embedding_losses = embedding_losses * relevant_target_attn_mask
+    masked_embedding_losses = logits_loss * relevant_target_attn_mask
 
     # compute the loss
     loss = torch.sum(masked_embedding_losses) / torch.sum(relevant_target_attn_mask)
@@ -639,9 +656,9 @@ while iter_num < max_iter_num:
     
     # with open(os.path.join(out_dir, 'batch.jsonl'), 'a') as f:
     #     f.write(json.dumps({'text': batch['text']}) + '\n')
-    with torch.no_grad():
-        target_embeddings = target_encoder(input_ids, attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()) # get target embeddings, no need to provide input indices.
-        target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
+    # with torch.no_grad():
+    #     target_embeddings = target_encoder(input_ids, attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()) # get target embeddings, no need to provide input indices.
+    #     target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
 
     true_input_lengths = torch.sum(attention_mask, dim = 1).to('cpu') # get the true input length for each sample
 
@@ -656,11 +673,11 @@ while iter_num < max_iter_num:
         target_block_indices, context_block_indices, context_attention_mask, prediction_input_indices, prediction_attn_mask = collate_jepa_input_data(attention_mask.to('cpu'), true_input_lengths, target_max_mask_ratio, target_mask_start_ratio, target_block_nums, context_max_mask_ratio)
 
         with type_casting:
-            loss = compute_jepa_loss(
+            loss = compute_ce_loss(
                 context_encoder, 
                 predictor,
+                decoder,
                 input_ids, 
-                target_embeddings, 
                 target_block_indices, 
                 context_block_indices.to(device), 
                 context_attention_mask, 
@@ -692,12 +709,13 @@ while iter_num < max_iter_num:
 
         _new_lr = lr_scheduler.step()
         _new_wd = wd_scheduler.step()
-        _new_m = ema_scheduler.step(context_encoder, target_encoder)
+        # _new_m = ema_scheduler.step(context_encoder, target_encoder)
 
         # train_loss = loss.item()
-        torch.save(context_encoder.state_dict(), train_context_encoder_path)
-        torch.save(target_encoder.state_dict(), train_target_encoder_path)
-        torch.save(predictor.state_dict(), train_predictor_path)
+        # torch.save(context_encoder.state_dict(), train_context_encoder_path)
+        # torch.save(target_encoder.state_dict(), train_target_encoder_path)
+        # torch.save(predictor.state_dict(), train_predictor_path)
+        torch.save(decoder.state_dict(), train_decoder_path)
         torch.save(optimizer.state_dict(), train_optimizer_path)
 
         train_run_state = {
@@ -719,7 +737,7 @@ while iter_num < max_iter_num:
                 'train/loss': train_loss,
                 'lr': _new_lr,
                 'wd': _new_wd,
-                'm': _new_m,
+                # 'm': _new_m,
                 # 'iter_num': iter_num
             }
             , step=iter_num * batch_size) #FIXME iter_num is not well defined, maybe use number of inputs seen?
@@ -741,7 +759,8 @@ while iter_num < max_iter_num:
                 input_ids, attention_mask = get_batch('train', batch_idx, min(batch_size, val_set_len - batch_idx * batch_size), tokenizer, max_input_length)
 
 
-                target_embeddings = target_encoder(input_ids.to(device), attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool().to(device)) # get target embeddings, no need to provide input indices.
+                # target_embeddings = target_encoder(input_ids.to(device), attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool().to(device)) # get target embeddings, no need to provide input indices.
+                # target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
 
                 true_input_lengths = torch.sum(attention_mask, dim = 1).to('cpu') # get the true input length for each sample
 
@@ -757,11 +776,12 @@ while iter_num < max_iter_num:
                     target_block_indices, context_block_indices, context_attention_mask, prediction_input_indices, prediction_attn_mask = collate_jepa_input_data(attention_mask.to('cpu'), true_input_lengths, target_max_mask_ratio, target_mask_start_ratio, target_block_nums, context_max_mask_ratio)
 
                     with type_casting:
-                        loss = compute_jepa_loss(
+                        loss = compute_ce_loss(
                             context_encoder, 
                             predictor,
+                            decoder,
                             input_ids, 
-                            target_embeddings, 
+                            # target_embeddings, 
                             target_block_indices, 
                             context_block_indices.to(device), 
                             context_attention_mask, 
@@ -779,9 +799,10 @@ while iter_num < max_iter_num:
 
         if mean_eval_loss < best_loss:
             best_loss = mean_eval_loss
-            torch.save(context_encoder.state_dict(), context_encoder_path)
-            torch.save(target_encoder.state_dict(), target_encoder_path)
-            torch.save(predictor.state_dict(), predictor_path)
+            # torch.save(context_encoder.state_dict(), context_encoder_path)
+            # torch.save(target_encoder.state_dict(), target_encoder_path)
+            # torch.save(predictor.state_dict(), predictor_path)
+            torch.save(decoder.state_dict(), decoder_path)
             torch.save(optimizer.state_dict(), optimizer_path)
 
             train_run_state = {
