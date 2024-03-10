@@ -1,24 +1,35 @@
 #%%
 import copy
-# import the library
+from argparse import ArgumentParser
 from dataclasses import dataclass
 import math
 import os
 import json
-from contextlib import nullcontext
+import toml
 import random
 import shutil
-import sys
 import numpy as np
 from torch.utils.data import DataLoader
+from contextlib import nullcontext
 from schedulers import CosineWDSchedule, ExponentialMovingAverageSchedule, WarmupCosineSchedule
-from src.models.encoder import Encoder, EncoderConfig, Predictor, PredictorConfig
+from models import Encoder, EncoderConfig, Predictor, PredictorConfig
 from transformers import LlamaTokenizer
 from datasets import load_from_disk
 from tqdm import tqdm
 
 import torch
 import torch.nn.functional as F
+
+#%%
+parser = ArgumentParser(description='')
+parser.add_argument('--init_from', type=str, required=False, choices=['scratch', 'resume'], help='init from scratch or resume')
+parser.add_argument('--encoder_config_path', type=str, required=False, help='path to the encoder config')
+parser.add_argument('--predictor_config_path', type=str, required=False, help='path to the predictor config')
+parser.add_argument('--opt_config_path', type=str, required=False, help='path to the optimizer config')
+parser.add_argument('--train_run_config_path', type=str, required=False, help='path to the train run config')
+parser.add_argument('--target_masking_strategies_path', type=str, required=False, help='path to the target masking strategies')
+parser.add_argument('--output_dir', type=str, required=False, help='path to the output directory')
+args = parser.parse_args()
 
 #%%
 def set_seed(seed):
@@ -31,6 +42,14 @@ def seed_worker(worker_id):
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
+def dict_to_json(dictionary, path):
+    with open(path, 'w') as f:
+        json.dump(dictionary, f, indent=2)
+
+def json_to_dict(path):
+    with open(path, 'r') as f:
+        return json.load(f)
+
 def dataclass_to_json(dataclass, path):
     with open(path, 'w') as f:
         json.dump(dataclass.__dict__, f, indent=2)
@@ -40,17 +59,12 @@ def json_to_dataclass(dataclass, path):
         data = json.load(f)
     return dataclass(**data)
 
-#%%
-# encoder_config = EncoderConfig(
-#     block_size = 1024,
-#     vocab_size = 32000, # LLAMA tokenizer is 32000, which is a multiple of 64 for efficiency
-#     n_layer = 12,
-#     n_head = 12,
-#     n_embd = 768,
-#     dropout = 0.0,
-#     bias = True, # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better on small datasets
-# )
+def toml_to_dataclass(dataclass, path):
+    with open(path, 'r') as f:
+        data = toml.load(f)
+    return dataclass(**data)
 
+#%%
 encoder_config = EncoderConfig(
     block_size = 1024,
     vocab_size = 32000, # LLAMA tokenizer is 32000, which is a multiple of 64 for efficiency
@@ -60,7 +74,8 @@ encoder_config = EncoderConfig(
     rotary_n_embd = 32,
     dropout = 0.0,
     bias = True, # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better on small datasets
-)
+) if not args.encoder_config_path else toml_to_dataclass(EncoderConfig, args.encoder_config_path)
+
 
 predictor_config = PredictorConfig(
     n_layer = 8,
@@ -71,7 +86,7 @@ predictor_config = PredictorConfig(
     dropout = 0.0,
     bias = True, # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better on small datasets
     trainable_mask_emb=True#False
-)
+) if not args.predictor_config_path else toml_to_dataclass(PredictorConfig, args.predictor_config_path)
 
 @dataclass
 class TrainRunConfig:
@@ -79,7 +94,7 @@ class TrainRunConfig:
     accumulation_steps: int = 4
     eval_interval: int = 40
     num_eval_batches: int = 20
-    max_iter_num: int | None = 100
+    max_iter_num: int | None = None
     random_seed: int = 42
 
 train_run_config = TrainRunConfig(
@@ -87,9 +102,9 @@ train_run_config = TrainRunConfig(
     accumulation_steps=64,
     eval_interval=1024,
     num_eval_batches = 200,
-    max_iter_num=100,
+    max_iter_num=None,
     random_seed=42
-)
+) if not args.train_run_config_path else toml_to_dataclass(TrainRunConfig, args.train_run_config_path)
 
 
 @dataclass
@@ -103,6 +118,7 @@ class OptimizerConfig:
     lr: float = 0.001
     start_lr: float = 0.0002
     final_lr: float = 1.0e-06
+    grad_clip: float = 1.0
 
 #%%
 opt_config = OptimizerConfig(
@@ -115,55 +131,8 @@ opt_config = OptimizerConfig(
     lr = 0.001, # 0.001
     start_lr = 0.0002,
     final_lr = 1.0e-06,
-)
+) if not args.opt_config_path else toml_to_dataclass(OptimizerConfig, args.opt_config_path)
 
-#%%
-dataset_name = "TinyStories"
-dataset_dir = os.path.join("data", dataset_name)
-
-max_input_length = 1024
-#%%
-wandb_log = True
-wandb_project = "t-jepa"
-wandb_run_name = "fixed_target_range" #-1_epoch
-
-# compile_model = True 
-
-init_from = "scratch"
-init_from = "resume"
-init_from = init_from if not sys.argv[1:] else sys.argv[1]
-resume_from = "train" # "train" or "best"
-
-print(f"init from: {init_from}")
-
-out_dir = "out"
-train_out_dir = os.path.join(out_dir, "train")
-
-max_iter_num = None if not sys.argv[2:] else int(sys.argv[2])
-
-# best eval paths
-context_encoder_path = os.path.join(out_dir, "context_encoder.pt")
-target_encoder_path = os.path.join(out_dir, "target_encoder.pt")
-predictor_path = os.path.join(out_dir, "predictor.pt")
-optimizer_path = os.path.join(out_dir, "optimizer.pt")
-train_run_state_path = os.path.join(out_dir, "train_run_state.pt")
-
-# train paths
-train_context_encoder_path = os.path.join(out_dir, "train", "context_encoder.pt")
-train_target_encoder_path = os.path.join(out_dir, "train", "target_encoder.pt")
-train_predictor_path = os.path.join(out_dir, "train", "predictor.pt")
-train_optimizer_path = os.path.join(out_dir, "train", "optimizer.pt")
-train_train_run_state_path = os.path.join(out_dir, "train", "train_run_state.pt")
-
-
-
-encoder_config_path = os.path.join(out_dir, "encoder_config.json")
-predictor_config_path = os.path.join(out_dir, "predictor_config.json")
-opt_config_path = os.path.join(out_dir, "opt_config.json")
-train_run_config_path = os.path.join(out_dir, "train_run_config.json")
-target_masking_strategies_path = os.path.join(out_dir, "target_masking_strategies.json")
-
-#%%
 #TODO: remove
 context_max_mask_ratio = 0.8#1.0 # how much of the input should be included in the context
 target_max_mask_ratio = .25# how much of the input should be used for targets
@@ -171,15 +140,15 @@ target_block_max_num = 4
 target_block_min_num = 1 
 
 #%%
-@dataclass
-class TargetMaskingStrategy:
-    target_block_size: int | None = 8
-    target_block_size_mean: int | None = 8
-    target_block_size_std: float | None = 0.15
-    target_max_mask_ratio: float = 0.25
-    target_block_max_num: int | None = None
-    target_mask_start_ratio: float | None = 0.0
-    context_max_mask_ratio: float | None = 1.0
+# @dataclass
+# class TargetMaskingStrategy:
+#     target_block_size: int | None = 8
+#     target_block_size_mean: int | None = 8
+#     target_block_size_std: float | None = 0.15
+#     target_max_mask_ratio: float = 0.25
+#     target_block_max_num: int | None = None
+#     target_mask_start_ratio: float | None = 0.0
+#     context_max_mask_ratio: float | None = 1.0
 
 #%%
 # new format
@@ -232,6 +201,56 @@ target_masking_strategies = [
 
 ]
 
+target_masking_strategies = target_masking_strategies if not args.target_masking_strategies_path else json_to_dict(args.target_masking_strategies_path)
+
+#%%
+dataset_name = "TinyStories"
+dataset_dir = os.path.join("data", dataset_name)
+
+max_input_length = 1024
+#%%
+wandb_log = True
+wandb_project = "t-jepa"
+wandb_run_name = "fixed_target_range" #-1_epoch
+
+# compile_model = True 
+
+init_from = "scratch"
+init_from = "resume"
+init_from = init_from if not args.init_from else args.init_from
+resume_from = "train" # "train" or "best"
+
+print(f"init from: {init_from}")
+
+out_dir = "out" if not args.output_dir else args.output_dir
+train_out_dir = os.path.join(out_dir, "train")
+
+max_iter_num = None
+
+# best eval paths
+context_encoder_path = os.path.join(out_dir, "context_encoder.pt")
+target_encoder_path = os.path.join(out_dir, "target_encoder.pt")
+predictor_path = os.path.join(out_dir, "predictor.pt")
+optimizer_path = os.path.join(out_dir, "optimizer.pt")
+train_run_state_path = os.path.join(out_dir, "train_run_state.pt")
+
+# train paths
+train_context_encoder_path = os.path.join(out_dir, "train", "context_encoder.pt")
+train_target_encoder_path = os.path.join(out_dir, "train", "target_encoder.pt")
+train_predictor_path = os.path.join(out_dir, "train", "predictor.pt")
+train_optimizer_path = os.path.join(out_dir, "train", "optimizer.pt")
+train_train_run_state_path = os.path.join(out_dir, "train", "train_run_state.pt")
+
+
+
+encoder_config_path = os.path.join(out_dir, "encoder_config.json")
+predictor_config_path = os.path.join(out_dir, "predictor_config.json")
+opt_config_path = os.path.join(out_dir, "opt_config.json")
+train_run_config_path = os.path.join(out_dir, "train_run_config.json")
+target_masking_strategies_path = os.path.join(out_dir, "target_masking_strategies.json")
+
+#%%
+
 
 #%%
 batch_size = train_run_config.batch_size
@@ -266,6 +285,7 @@ if init_from == "scratch":
     dataclass_to_json(predictor_config, predictor_config_path)
     dataclass_to_json(opt_config, opt_config_path)
     dataclass_to_json(train_run_config, train_run_config_path)
+    dict_to_json(target_masking_strategies, target_masking_strategies_path)
     with open(target_masking_strategies_path, 'w') as f:
         json.dump(target_masking_strategies, f, indent=2)
 
@@ -275,6 +295,8 @@ elif init_from == "resume":
     predictor_config = json_to_dataclass(PredictorConfig, predictor_config_path)
     opt_config = json_to_dataclass(OptimizerConfig, opt_config_path)
     train_run_config = json_to_dataclass(TrainRunConfig, train_run_config_path)
+    target_masking_strategies = json_to_dict(target_masking_strategies_path)
+
 
     context_encoder = Encoder(encoder_config)
     target_encoder = Encoder(encoder_config)
@@ -391,7 +413,7 @@ param_groups = [
         }
     ]
 
-optimizer = torch.optim.AdamW(param_groups)
+optimizer = torch.optim.AdamW(param_groups, lr=start_lr)
 if init_from == "resume":
     resume_optimizer_path = train_optimizer_path if resume_from == "train" else optimizer_path
     optimizer.load_state_dict(torch.load(resume_optimizer_path))
@@ -440,6 +462,13 @@ def get_batch(split, index, batch_size, tokenizer, max_length):
     else:
         input_ids = input_ids.to(device)
         attention_mask = attention_mask.to(device)
+
+    #FIXME: make sure that no 0 length inputs are left after the prepare script ran
+    # filter out 0 length inputs
+    lengths = torch.sum(attention_mask, dim = 1)
+    mask = lengths > 0
+    input_ids = input_ids[mask]
+    attention_mask = attention_mask[mask]
     return input_ids, attention_mask
 
 
@@ -596,11 +625,6 @@ def compute_jepa_loss(
 
     return loss    
 
-# def get_target_block_embeddings(target_embeddings, target_block_indices):
-#     return torch.stack([target_embeddings[index,target_block_range,:] for index, target_block_range in enumerate(target_block_indices)]) # get the target embeddings
-
-# def get_context_blocks_embeddings()
-
 #%%
 total_inputs_seen = 0 if init_from == "scratch" else train_run_data['total_inputs_seen']
 best_loss = 1e9
@@ -749,7 +773,7 @@ while iter_num < max_iter_num:
 
                     eval_loss += loss.item()
 
-                mean_eval_loss += eval_loss.item() / num_eval_batches
+                mean_eval_loss += eval_loss / num_eval_batches
 
 
         if mean_eval_loss < best_loss:

@@ -1,7 +1,9 @@
-# T-JEPA
+# T-JEPA (work in progress)
+
+This repository aims to provide a simple implementation, inspired by Karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT) repo, of the Joint-Embedding Predictive Architecture (JEPA) in PyTorch for text data. The project takes inspiration from I-JEPA and V-JEPA, with some differences. All targets for a single masked sample are packed into the same input of the predictor. The predictor context inputs do not attend to the target embeddings, while the target embeddings attend to the context and their respective target chunks. The target masking strategy is taken from the UL2 paper. With the provided configs the model is trainable (no mode collapse) using the TinyStories dataset. Will need to add testing and evaluation scripts.
 
 ## Setup (Local)
-
+### Create virtual environment
 install python 3.11 with pyenv
 
 ```bash
@@ -25,100 +27,58 @@ Optional (but recommended): Set the virtual environment to be automatically acti
 pyenv local tjepa
 ```
 
+### Install 
+
 Install the required packages
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Install the rotary embeddings package
+Install the rotary embeddings package (which supports custom indexing)
 
 ```bash
 git clone https://github.com/AlxSp/rotary-embedding-torch
-cd rotary-embedding-torch/
-git checkout indexing
-cd ..
 pip install -e ./rotary-embedding-torch
 ```
 
-# TODOs
+## Training
 
-## Short term
-
-### Immediate TODOs
-- [X] Device
-- [X] Save/Load models
-- [X] Save/Load optimizer & schedulers
-- [X] Ensure reproducibility
-- [X] Log training info
-- [X] Training runs
-- [X] Target Packing
-- [X] Mask out targets with reoccurring token sequences
-- [X] UL2 targets
-- [ ] Proper data prep script
-- [ ] Double check target context creation
-- [ ] Context/Input Packing
-
-# Target & Context masking strategies
-
-```python
-# R denoising
-{
-    "target_block_size_mean" : 3,
-    # "target_block_size_std" : 0.15,
-    "max_target_mask_ratio" : 0.25,
-    "target_block_num" : None,
-},
-{
-    "target_block_size_mean" : 8,
-    # "target_block_size_std" : 0.15,
-    "max_target_mask_ratio" : 0.25,
-    "target_block_num" : None,
-},
-# X denoising
-{
-    "target_block_size_mean" : 3,
-    # "target_block_size_std" : 0.5,
-    "max_target_mask_ratio" : 0.5,
-    "target_block_num" : None,
-},
-{
-    "target_block_size_mean" : 8,
-    # "target_block_size_std" : 0.5,
-    "max_target_mask_ratio" : 0.5,
-    "target_block_num" : None,
-},
-{
-    "target_block_size_mean" : 64,
-    # "target_block_size_std" : 0.5,
-    "max_target_mask_ratio" : 0.15,
-},
-{
-    "target_block_size_mean" : 64,
-    # "target_block_size_std" : 0.5,
-    "max_target_mask_ratio" : 0.5,
-},
-# S denoising
-{
-    "target_block_size_mean" : None,
-    # "target_block_size_std" : 0.5,
-    "max_target_mask_start_ratio" : 0.75,
-    "max_target_mask_ratio" : 0.25,
-    "target_block_num" : 1,
-}
+```bash
+python train.py
 ```
+
+you can ever modify the input arguments to the train.py script to match or add them to a set of config files and pass the files as arguments to the train.py script (see files `configs/tiny_Stories_training`).
+
+### train.py input arguments
+
+- `--init_from` (str, default: 'scratch'): init from `scratch` or `resume`
+- `--encoder_config_path` (str, required): path to the encoder config (if init_from == 'resume' is loaded from the training directory)
+- `--predictor_config_path` (str, required): path to the predictor config
+- `--opt_config_path` (str, required): path to the optimizer config
+- `--train_run_config_path` (str, required): path to the train run config
+- `--target_masking_strategies_path` (str, required): path to the target masking strategies
+
+  
+
+# Target & Context masking strategy parameters
+
+- `target_block_size` (int, required): mean of the target block size
+- `max_target_mask_ratio` (float, default: 0.15): maximum ratio of the target to be masked
+- `max_target_mask_start_ratio` (float, default: 0.15): maximum ratio of the target start to be masked
 
 ## Datasets
 
-# TinyStories
+### TinyStories
 
-max token length with LLaMa tokenizer: 1124
+run the prepare.py script to download and prepare the dataset in `data/TinyStories`
 
-```python
-import datasets
-dataset = load_dataset("roneneldan/TinyStories")
-dataset.save_to_disk("data/TinyStories")
+```bash
+python data/TinyStories/prepare.py
 ```
+
+### SlimPajama
+TODO: add the prepare.py script to download and prepare the dataset in `data/SlimPajama`
 
 ## Citations
 
@@ -129,6 +89,15 @@ dataset.save_to_disk("data/TinyStories")
   journal={arXiv preprint arXiv:2301.08243},
   year={2023},
   github={https://github.com/facebookresearch/ijepa}
+}
+```
+
+```bibtex
+@article{bardes2024revisiting,
+  title={Revisiting Feature Prediction for Learning Visual Representations from Video},
+  author={Bardes, Adrien and Garrido, Quentin and Ponce, Jean and Rabbat, Michael, and LeCun, Yann and Assran, Mahmoud and Ballas, Nicolas},
+  journal={arXiv preprint},
+  year={2024}
 }
 ```
 

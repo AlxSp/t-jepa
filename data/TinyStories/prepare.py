@@ -36,9 +36,6 @@ tokenized = dataset.map(tokenize_and_cast, num_proc=num_proc)
 tokenized = tokenized.filter(lambda x: torch.tensor(x['input_ids']).shape[1] >= 64, num_proc=num_proc)
 
 #%%
-tokenized.column_names
-
-#%%
 # remove the input_ids from the tokenized dataset
 tokenized = tokenized.remove_columns('input_ids')
 #%%

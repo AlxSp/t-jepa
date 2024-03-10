@@ -1,0 +1,32 @@
+# R denoising
+[[target_masking_strategies]]
+target_block_size_mean = 3
+target_max_mask_ratio = 0.25
+
+[[target_masking_strategies]]
+target_block_size_mean = 8
+target_max_mask_ratio = 0.25
+
+# X denoising
+[[target_masking_strategies]]
+target_block_size_mean = 3
+target_max_mask_ratio = 0.5
+
+[[target_masking_strategies]]
+target_block_size_mean = 8
+target_max_mask_ratio = 0.8
+
+[[target_masking_strategies]]
+target_block_size_mean = 64
+target_max_mask_ratio = 0.15
+
+[[target_masking_strategies]]
+target_block_size_mean = 64
+target_max_mask_ratio = 0.5
+
+# S denoising
+[[target_masking_strategies]]
+target_mask_start_ratio = 0.75
+target_max_mask_ratio = 0.25
+target_block_max_num = 1
+context_max_mask_ratio = 1.0
