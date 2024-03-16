@@ -211,16 +211,16 @@ dataset_dir = os.path.join("data", dataset_name)
 
 max_input_length = 1024
 #%%
-wandb_log = True
+wandb_log = False
 wandb_project = "t-jepa-finetune"
 wandb_run_name = "gen" #-1_epoch
 
 # compile_model = True 
 
-init_from = "resume"
 init_from = "scratch"
+init_from = "resume"
 init_from = init_from if not args.init_from else args.init_from
-resume_from = "train" # "train" or "best"
+resume_from = "best"#"train" # "train" or "best"
 
 print(f"init from: {init_from}")
 
@@ -271,44 +271,10 @@ trained_context_encoder_path = os.path.join("out", "context_encoder.pt")
 trained_predictor_path = os.path.join("out", "predictor.pt")
 
 #%%
-if init_from == "scratch":
-    set_seed(random_seed)
 
-    context_encoder = Encoder(encoder_config) # initialize context encoder
-    predictor = Predictor(predictor_config) # initialize predictor
-    
-    #FIXME: add path from original training
-    context_encoder.load_state_dict(torch.load(trained_context_encoder_path))
-    predictor.load_state_dict(torch.load(trained_predictor_path))
-
-    torch.save(context_encoder.state_dict(), context_encoder_path)
-    torch.save(predictor.state_dict(), predictor_path)
-
-    # freeze context and predictor
-    for param in context_encoder.parameters():
-        param.requires_grad = False
-
-    for param in context_encoder.parameters():
-        param.requires_grad = False
-
-    decoder = PredictionDecoder(decoder_config) # initialize decoder
-
-    if os.path.exists(out_dir):
-        shutil.rmtree(out_dir)
-    os.makedirs(out_dir, exist_ok=True)
-    os.makedirs(train_out_dir, exist_ok=True)
-
-
-    dataclass_to_json(encoder_config, encoder_config_path)
-    dataclass_to_json(predictor_config, predictor_config_path)
-    dataclass_to_json(opt_config, opt_config_path)
-    dataclass_to_json(train_run_config, train_run_config_path)
-    dict_to_json(target_masking_strategies, target_masking_strategies_path)
-    with open(target_masking_strategies_path, 'w') as f:
-        json.dump(target_masking_strategies, f, indent=2)
 
     
-elif init_from == "resume":
+if init_from == "resume":
     encoder_config = json_to_dataclass(EncoderConfig, encoder_config_path)
     predictor_config = json_to_dataclass(PredictorConfig, predictor_config_path)
     opt_config = json_to_dataclass(OptimizerConfig, opt_config_path)
@@ -320,13 +286,13 @@ elif init_from == "resume":
     predictor = Predictor(predictor_config)
     decoder = PredictionDecoder(decoder_config)
 
-    # resume_context_encoder_path = train_context_encoder_path if resume_from == "train" else context_encoder_path
-    # resume_predictor_path = train_predictor_path if resume_from == "train" else predictor_path
+    resume_context_encoder_path = train_context_encoder_path if resume_from == "train" else context_encoder_path
+    resume_predictor_path = train_predictor_path if resume_from == "train" else predictor_path
     resume_train_run_state_path = train_train_run_state_path if resume_from == "train" else train_run_state_path
     
 
-    context_encoder.load_state_dict(torch.load(context_encoder_path))
-    predictor.load_state_dict(torch.load(predictor_path))
+    context_encoder.load_state_dict(torch.load(trained_context_encoder_path))
+    predictor.load_state_dict(torch.load(trained_predictor_path))
 
     train_run_data = torch.load(resume_train_run_state_path)
 
@@ -591,6 +557,7 @@ def compute_ce_loss(
         context_encoder, 
         predictor,
         decoder,
+        tokenizer,
         input_ids,
         target_block_indices, 
         context_block_indices, 
@@ -644,6 +611,17 @@ def compute_ce_loss(
     # compute the loss
     loss = torch.sum(masked_embedding_losses) / torch.sum(relevant_target_attn_mask)
 
+    for o, t in zip(out, targets, ):
+        print(
+            f"Predicted output: {tokenizer.decode(torch.argmax(o, dim = -1))}\n",
+            f"Target output: {tokenizer.decode(t)}\n",
+        )
+
+    # print(
+    #     f"Predicted output: {tokenizer.decode(torch.argmax(out, dim = -1))}\n",
+    #     f"Target output: {tokenizer.decode(targets)}\n",
+    # )
+
     return loss    
 
 #%%
@@ -653,188 +631,151 @@ pbar = tqdm(total=max_iter_num - iter_num)
 while iter_num < max_iter_num:
     epoch = iter_num // train_set_len
     
-    set_seed(random_seed) #TODO: find better solution for reproducibility?
-    batch_idx = iter_num % math.ceil(train_set_len / batch_size)
-    input_ids, attention_mask = get_batch('train', batch_idx, min(batch_size, train_set_len - batch_idx * batch_size), tokenizer, max_input_length)
+    # set_seed(random_seed) #TODO: find better solution for reproducibility?
+    # batch_idx = iter_num % math.ceil(train_set_len / batch_size)
+    # input_ids, attention_mask = get_batch('train', batch_idx, min(batch_size, train_set_len - batch_idx * batch_size), tokenizer, max_input_length)
     
-    # with open(os.path.join(out_dir, 'batch.jsonl'), 'a') as f:
-    #     f.write(json.dumps({'text': batch['text']}) + '\n')
-    # with torch.no_grad():
-    #     target_embeddings = target_encoder(input_ids, attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()) # get target embeddings, no need to provide input indices.
-    #     target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
+    # # with open(os.path.join(out_dir, 'batch.jsonl'), 'a') as f:
+    # #     f.write(json.dumps({'text': batch['text']}) + '\n')
+    # # with torch.no_grad():
+    # #     target_embeddings = target_encoder(input_ids, attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()) # get target embeddings, no need to provide input indices.
+    # #     target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
 
-    true_input_lengths = torch.sum(attention_mask, dim = 1).to('cpu') # get the true input length for each sample
+    # true_input_lengths = torch.sum(attention_mask, dim = 1).to('cpu') # get the true input length for each sample
 
-    train_loss = 0
-    for strategy in target_masking_strategies:
-        target_max_mask_ratio = strategy.get("target_max_mask_ratio", target_max_mask_ratio)
-        context_max_mask_ratio = strategy.get("context_max_mask_ratio", context_max_mask_ratio)
-        target_block_nums = torch.tensor([strategy.get("target_block_max_num")] * len(true_input_lengths)) if strategy.get("target_block_max_num") is not None else true_input_lengths * target_max_mask_ratio // strategy.get("target_block_size", 1)
-        target_block_nums = torch.where(target_block_nums < target_block_min_num, target_block_min_num, target_block_nums).int()
-        target_mask_start_ratio = strategy.get("target_mask_start_ratio", 0.0)
+    # train_loss = 0
+    # for strategy in target_masking_strategies:
+    #     target_max_mask_ratio = strategy.get("target_max_mask_ratio", target_max_mask_ratio)
+    #     context_max_mask_ratio = strategy.get("context_max_mask_ratio", context_max_mask_ratio)
+    #     target_block_nums = torch.tensor([strategy.get("target_block_max_num")] * len(true_input_lengths)) if strategy.get("target_block_max_num") is not None else true_input_lengths * target_max_mask_ratio // strategy.get("target_block_size", 1)
+    #     target_block_nums = torch.where(target_block_nums < target_block_min_num, target_block_min_num, target_block_nums).int()
+    #     target_mask_start_ratio = strategy.get("target_mask_start_ratio", 0.0)
 
-        target_block_indices, context_block_indices, context_attention_mask, prediction_input_indices, prediction_attn_mask = collate_jepa_input_data(attention_mask.to('cpu'), true_input_lengths, target_max_mask_ratio, target_mask_start_ratio, target_block_nums, context_max_mask_ratio)
+    #     target_block_indices, context_block_indices, context_attention_mask, prediction_input_indices, prediction_attn_mask = collate_jepa_input_data(attention_mask.to('cpu'), true_input_lengths, target_max_mask_ratio, target_mask_start_ratio, target_block_nums, context_max_mask_ratio)
 
-        with type_casting:
-            loss = compute_ce_loss(
-                context_encoder, 
-                predictor,
-                decoder,
-                input_ids, 
-                target_block_indices, 
-                context_block_indices.to(device), 
-                context_attention_mask, 
-                prediction_input_indices, 
-                prediction_attn_mask,
-                device = device
-            )
+    #     with type_casting:
+    #         loss = compute_ce_loss(
+    #             context_encoder, 
+    #             predictor,
+    #             decoder,
+    #             input_ids, 
+    #             target_block_indices, 
+    #             context_block_indices.to(device), 
+    #             context_attention_mask, 
+    #             prediction_input_indices, 
+    #             prediction_attn_mask,
+    #             device = device
+    #         )
 
-        assert not torch.isnan(loss), 'loss is nan!'
+    #     assert not torch.isnan(loss), 'loss is nan!'
 
-        loss /= accumulation_steps
-        scaler.scale(loss).backward()
-        train_loss += loss.item()
+    #     loss /= accumulation_steps
+    #     scaler.scale(loss).backward()
+    #     train_loss += loss.item()
 
-    total_inputs_seen += sum(true_input_lengths)
+    # total_inputs_seen += sum(true_input_lengths)
 
-    # if the a full batch has been accumulated, update the model weights
-    if (iter_num + 1) % accumulation_steps == 0:
+    # # if the a full batch has been accumulated, update the model weights
+    # if (iter_num + 1) % accumulation_steps == 0:
 
-        if grad_clip != 0.0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(context_encoder.parameters(), grad_clip)
-            torch.nn.utils.clip_grad_norm_(predictor.parameters(), grad_clip)
+    #     if grad_clip != 0.0:
+    #         scaler.unscale_(optimizer)
+    #         torch.nn.utils.clip_grad_norm_(context_encoder.parameters(), grad_clip)
+    #         torch.nn.utils.clip_grad_norm_(predictor.parameters(), grad_clip)
 
-        scaler.step(optimizer)
-        scaler.update()
+    #     scaler.step(optimizer)
+    #     scaler.update()
 
-        optimizer.zero_grad(set_to_none=True)
+    #     optimizer.zero_grad(set_to_none=True)
 
-        _new_lr = lr_scheduler.step()
-        _new_wd = wd_scheduler.step()
-        # _new_m = ema_scheduler.step(context_encoder, target_encoder)
+    #     _new_lr = lr_scheduler.step()
+    #     _new_wd = wd_scheduler.step()
+    #     # _new_m = ema_scheduler.step(context_encoder, target_encoder)
 
-        # train_loss = loss.item()
-        # torch.save(context_encoder.state_dict(), train_context_encoder_path)
-        # torch.save(target_encoder.state_dict(), train_target_encoder_path)
-        # torch.save(predictor.state_dict(), train_predictor_path)
-        torch.save(decoder.state_dict(), train_decoder_path)
-        torch.save(optimizer.state_dict(), train_optimizer_path)
+    #     # train_loss = loss.item()
+    #     # torch.save(context_encoder.state_dict(), train_context_encoder_path)
+    #     # torch.save(target_encoder.state_dict(), train_target_encoder_path)
+    #     # torch.save(predictor.state_dict(), train_predictor_path)
+    #     torch.save(decoder.state_dict(), train_decoder_path)
+    #     torch.save(optimizer.state_dict(), train_optimizer_path)
 
-        train_run_state = {
-                'iter_num': iter_num,
-                'total_inputs_seen' : total_inputs_seen,
-                'epoch': epoch,
-                'batch_idx': batch_idx,
-                'loss': train_loss,
-                'batch_size': batch_size,
-                'accumulation_steps': accumulation_steps,
-                'torch_seed': torch.initial_seed(),
-                'lr': lr
-            }
+    #     train_run_state = {
+    #             'iter_num': iter_num,
+    #             'total_inputs_seen' : total_inputs_seen,
+    #             'epoch': epoch,
+    #             'batch_idx': batch_idx,
+    #             'loss': train_loss,
+    #             'batch_size': batch_size,
+    #             'accumulation_steps': accumulation_steps,
+    #             'torch_seed': torch.initial_seed(),
+    #             'lr': lr
+    #         }
 
-        torch.save(train_run_state, train_train_run_state_path)
+    #     torch.save(train_run_state, train_train_run_state_path)
 
-        if wandb_log:
-            wandb.log({
-                'train/loss': train_loss,
-                'lr': _new_lr,
-                'wd': _new_wd,
-                # 'm': _new_m,
-                # 'iter_num': iter_num
-            }
-            , step=iter_num * batch_size) #FIXME iter_num is not well defined, maybe use number of inputs seen?
+    #     if wandb_log:
+    #         wandb.log({
+    #             'train/loss': train_loss,
+    #             'lr': _new_lr,
+    #             'wd': _new_wd,
+    #             # 'm': _new_m,
+    #             # 'iter_num': iter_num
+    #         }
+    #         , step=iter_num * batch_size) #FIXME iter_num is not well defined, maybe use number of inputs seen?
 
         # with open(os.path.join(out_dir, 'losses.jsonl'), 'a') as f:
         #     f.write(json.dumps({'loss': train_loss, 'iter_num' : iter_num}) + '\n')
 
     # if the eval interval has been reached, evaluate the model
-    if iter_num % eval_interval == 0 and iter_num > 0:
-        set_seed(random_seed + iter_num)
-        
-        context_encoder.eval()
-        predictor.eval()
+    # if iter_num % eval_interval == 0 and iter_num > 0:
+    set_seed(random_seed + iter_num)
+    
+    context_encoder.eval()
+    predictor.eval()
 
-        mean_eval_loss = 0
-        with torch.no_grad():
-            for eval_iter in range(num_eval_batches):
-                batch_idx = eval_iter % math.ceil(val_set_len / batch_size)
-                input_ids, attention_mask = get_batch('train', batch_idx, min(batch_size, val_set_len - batch_idx * batch_size), tokenizer, max_input_length)
-
-
-                # target_embeddings = target_encoder(input_ids.to(device), attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool().to(device)) # get target embeddings, no need to provide input indices.
-                # target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
-
-                true_input_lengths = torch.sum(attention_mask, dim = 1).to('cpu') # get the true input length for each sample
-
-                eval_loss = 0
-                for strategy in target_masking_strategies:
-                    target_max_mask_ratio = strategy.get("target_max_mask_ratio", target_max_mask_ratio)
-                    context_max_mask_ratio = strategy.get("context_max_mask_ratio", context_max_mask_ratio)
-                    target_block_nums = torch.tensor([strategy.get("target_block_max_num")] * len(true_input_lengths)) if strategy.get("target_block_max_num") is not None else true_input_lengths * target_max_mask_ratio // strategy.get("target_block_size_mean", 1)
-                    target_block_nums = torch.where(target_block_nums < target_block_min_num, target_block_min_num, target_block_nums).int()
-                    
-                    target_mask_start_ratio = strategy.get("target_mask_start_ratio", 0.0)
-
-                    target_block_indices, context_block_indices, context_attention_mask, prediction_input_indices, prediction_attn_mask = collate_jepa_input_data(attention_mask.to('cpu'), true_input_lengths, target_max_mask_ratio, target_mask_start_ratio, target_block_nums, context_max_mask_ratio)
-
-                    with type_casting:
-                        loss = compute_ce_loss(
-                            context_encoder, 
-                            predictor,
-                            decoder,
-                            input_ids,  
-                            target_block_indices, 
-                            context_block_indices.to(device), 
-                            context_attention_mask, 
-                            prediction_input_indices, 
-                            prediction_attn_mask,
-                            device = device
-                        )
-
-                    assert not torch.isnan(loss), 'loss is nan!'
-
-                    eval_loss += loss.item()
-
-                mean_eval_loss += eval_loss / num_eval_batches
+    mean_eval_loss = 0
+    with torch.no_grad():
+        for eval_iter in range(num_eval_batches):
+            batch_idx = eval_iter % math.ceil(val_set_len / batch_size)
+            input_ids, attention_mask = get_batch('train', batch_idx, min(batch_size, val_set_len - batch_idx * batch_size), tokenizer, max_input_length)
 
 
-        if mean_eval_loss < best_loss:
-            best_loss = mean_eval_loss
-            # torch.save(context_encoder.state_dict(), context_encoder_path)
-            # torch.save(target_encoder.state_dict(), target_encoder_path)
-            # torch.save(predictor.state_dict(), predictor_path)
-            torch.save(decoder.state_dict(), decoder_path)
-            torch.save(optimizer.state_dict(), optimizer_path)
+            # target_embeddings = target_encoder(input_ids.to(device), attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool().to(device)) # get target embeddings, no need to provide input indices.
+            # target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
 
-            train_run_state = {
-                    'iter_num': iter_num,
-                    'total_inputs_seen' : total_inputs_seen,
-                    'epoch': epoch,
-                    'batch_idx': batch_idx,
-                    'loss': mean_eval_loss,
-                    'batch_size': batch_size,
-                    'accumulation_steps': accumulation_steps,
-                    'torch_seed': torch.initial_seed(),
-                    'lr': lr
-                }
+            true_input_lengths = torch.sum(attention_mask, dim = 1).to('cpu') # get the true input length for each sample
 
-            torch.save(train_run_state, train_run_state_path)
+            eval_loss = 0
+            for strategy in target_masking_strategies:
+                target_max_mask_ratio = strategy.get("target_max_mask_ratio", target_max_mask_ratio)
+                context_max_mask_ratio = strategy.get("context_max_mask_ratio", context_max_mask_ratio)
+                target_block_nums = torch.tensor([strategy.get("target_block_max_num")] * len(true_input_lengths)) if strategy.get("target_block_max_num") is not None else true_input_lengths * target_max_mask_ratio // strategy.get("target_block_size_mean", 1)
+                target_block_nums = torch.where(target_block_nums < target_block_min_num, target_block_min_num, target_block_nums).int()
+                
+                target_mask_start_ratio = strategy.get("target_mask_start_ratio", 0.0)
 
+                target_block_indices, context_block_indices, context_attention_mask, prediction_input_indices, prediction_attn_mask = collate_jepa_input_data(attention_mask.to('cpu'), true_input_lengths, target_max_mask_ratio, target_mask_start_ratio, target_block_nums, context_max_mask_ratio)
 
-        if wandb_log:
-            wandb.log({
-                # 'train/loss': loss.item(),
-                'val/loss': mean_eval_loss,
-                # 'lr': _new_lr,
-                # 'wd': _new_wd,
-                # 'm': _new_m,
-                # 'iter_num': iter_num
-            }
-            , step=iter_num * batch_size) #FIXME iter_num is not well defined, maybe use number of inputs seen?
+                with type_casting:
+                    loss = compute_ce_loss(
+                        context_encoder, 
+                        predictor,
+                        decoder,
+                        tokenizer,
+                        input_ids,  
+                        target_block_indices, 
+                        context_block_indices.to(device), 
+                        context_attention_mask, 
+                        prediction_input_indices, 
+                        prediction_attn_mask,
+                        device = device
+                    )
 
-        context_encoder.train()
-        predictor.train()
+                assert not torch.isnan(loss), 'loss is nan!'
+
+                eval_loss += loss.item()
+
+            mean_eval_loss += eval_loss / num_eval_batches
 
     iter_num += 1
     pbar.update(1)
