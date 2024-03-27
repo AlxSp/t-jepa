@@ -221,7 +221,7 @@ class Predictor(nn.Module):
         self.in_proj = nn.Identity() if config.ext_n_embd == config.n_embd else nn.Linear(config.ext_n_embd, config.n_embd, bias=config.bias)
         self.out_proj = nn.Identity() if config.ext_n_embd == config.n_embd else nn.Linear(config.n_embd, config.ext_n_embd, bias=config.bias)
 
-        self.mask_embedding = nn.Parameter(torch.ones(config.ext_n_embd)) if config.trainable_mask_emb else F.normalize(torch.ones(config.ext_n_embd), dim = 0)
+        self.mask_embedding = nn.Parameter(torch.zeros(config.ext_n_embd)) if config.trainable_mask_emb else F.normalize(torch.ones(config.ext_n_embd), dim = 0)
 
         self.transformer = nn.ModuleDict(dict(
             drop = nn.Dropout(config.dropout),
@@ -385,6 +385,25 @@ class PredictionDecoder(nn.Module):
         logits = self.lm_head(x)
 
         return logits
+    
+
+@dataclass
+class LinearClassifierProbeConfig:
+    n_embd: int = 768
+    n_classes: int = 2
+
+class LinearClassifierProbe(nn.Module):
+    """
+    A simple linear classifier probe for the embeddings
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.classifier = nn.Linear(config.n_embd, config.n_classes)
+
+    def forward(self, embeddings):
+        return self.classifier(embeddings)
+    
 
 if __name__ == "__main__":
     config = EncoderConfig(
