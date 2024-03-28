@@ -387,7 +387,7 @@ predictor.to(device)
 
 
 
-max_iter_num = math.ceil(train_set_len / batch_size) if not max_iter_num else max_iter_num
+max_iter_num = math.ceil(train_set_len / batch_size) * num_epochs if not max_iter_num else max_iter_num
 iter_num = 0 if init_from == "scratch" else train_run_data['iter_num'] + 1
 assert iter_num % accumulation_steps == 0, 'iter_num must be divisible by accumulation_steps without remainder. May be loaded incorrectly from resume dir'
 assert eval_interval % accumulation_steps == 0, 'eval_interval must be divisible by accumulation_steps without remainder'
@@ -413,7 +413,7 @@ param_groups = [
         }
     ]
 
-optimizer = torch.optim.AdamW(param_groups, lr=start_lr)
+optimizer = torch.optim.AdamW(param_groups, lr=start_lr, betas = (0.9, 0.95))
 if init_from == "resume":
     resume_optimizer_path = train_optimizer_path if resume_from == "train" else optimizer_path
     optimizer.load_state_dict(torch.load(resume_optimizer_path))
@@ -638,7 +638,7 @@ while iter_num < max_iter_num:
     
     # with open(os.path.join(out_dir, 'batch.jsonl'), 'a') as f:
     #     f.write(json.dumps({'text': batch['text']}) + '\n')
-    with torch.no_grad():
+    with torch.no_grad(), type_casting:
         target_embeddings = target_encoder(input_ids, attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()) # get target embeddings, no need to provide input indices.
         target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
 
@@ -737,10 +737,10 @@ while iter_num < max_iter_num:
         with torch.no_grad():
             for eval_iter in range(num_eval_batches):
                 batch_idx = eval_iter % math.ceil(val_set_len / batch_size)
-                input_ids, attention_mask = get_batch('train', batch_idx, min(batch_size, val_set_len - batch_idx * batch_size), tokenizer, max_input_length)
+                input_ids, attention_mask = get_batch('validation', batch_idx, min(batch_size, val_set_len - batch_idx * batch_size), tokenizer, max_input_length)
 
-
-                target_embeddings = target_encoder(input_ids.to(device), attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool().to(device)) # get target embeddings, no need to provide input indices.
+                with type_casting:
+                    target_embeddings = target_encoder(input_ids.to(device), attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool().to(device)) # get target embeddings, no need to provide input indices.
 
                 true_input_lengths = torch.sum(attention_mask, dim = 1).to('cpu') # get the true input length for each sample
 
