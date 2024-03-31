@@ -4,6 +4,7 @@ data/*
 !data/*.py
 
 out/
+classifier_out/
 wandb/
 
 # Virtual Environments

@@ -130,7 +130,7 @@ class Encoder(nn.Module):
         assert config.block_size is not None
         self.config = config
 
-        self.rotary_embedding = RotaryEmbedding(config.rotary_n_embd)
+        self.rotary_embedding = RotaryEmbedding(config.rotary_n_embd, cache_if_possible = False)
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -217,7 +217,7 @@ class Predictor(nn.Module):
         super().__init__()
         self.config = config
 
-        self.rotary_embedding = RotaryEmbedding(config.rotary_n_embd)
+        self.rotary_embedding = RotaryEmbedding(config.rotary_n_embd, cache_if_possible = False)
 
         self.in_proj = nn.Identity() if config.ext_n_embd == config.n_embd else nn.Linear(config.ext_n_embd, config.n_embd, bias=config.bias)
         self.out_proj = nn.Identity() if config.ext_n_embd == config.n_embd else nn.Linear(config.n_embd, config.ext_n_embd, bias=config.bias)

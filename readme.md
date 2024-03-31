@@ -3,7 +3,15 @@
 This repository aims to provide a simple implementation, inspired by Karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT) repo, of the Joint-Embedding Predictive Architecture (JEPA) in PyTorch for text data. The project takes inspiration from I-JEPA and V-JEPA, with some differences. All targets for a single masked sample are packed into the same input of the predictor. The predictor context inputs do not attend to the target embeddings, while the target embeddings attend to the context and their respective target chunks. The target masking strategy is taken from the UL2 paper. With the provided configs the model is trainable (no mode collapse) using the TinyStories dataset. Will need to add testing and evaluation scripts.
 
 ## Setup (Local)
-### Create virtual environment
+
+### Clone the repository
+
+Since the repository has a submodule, you need to clone it with the `--recurse-submodules` flag
+```bash
+git clone --recurse-submodules
+```
+
+### Create virtual environment (if you want to)
 install python 3.11 with pyenv
 
 ```bash
@@ -35,11 +43,18 @@ Install the required packages
 pip install -r requirements.txt
 ```
 
+Note: if you are running on a cloud instance you'll have to install the pytorch library with the wheel that matches the instance's CUDA version. You can find the wheel [here](https://pytorch.org/get-started/locally/)
+
 Install the rotary embeddings package (which supports custom indexing)
 
 ```bash
-git clone https://github.com/AlxSp/rotary-embedding-torch
 pip install -e ./rotary-embedding-torch
+```
+
+Note if you don't see the rotary-embedding-torch directory, you probably forgot to clone the repository with the `--recurse-submodules` flag. You can clone the submodule again with the following command:
+
+```bash
+git submodule update --init --recursive
 ```
 
 ## Training
