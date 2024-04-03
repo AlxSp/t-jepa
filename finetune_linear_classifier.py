@@ -111,8 +111,8 @@ class OptimizerConfig:
     weight_decay: float = 0.04
     final_weight_decay: float = 0.4
     warmup_steps: int = 0.025
-    lr: float = 0.001
-    start_lr: float = 0.0002
+    lr: float = 0.0001
+    start_lr: float = 0.00002
     final_lr: float = 1.0e-06
     grad_clip: float = 1.0
 
@@ -389,6 +389,7 @@ def get_batch(split, index, batch_size, tokenizer, max_length):
     #TODO: get labels
     data = dataset[split]
     samples = data[index:index+batch_size]
+
     tokenized = tokenizer(samples['sentence'], padding = True, truncation = True, max_length = max_length, return_tensors="pt", add_special_tokens = False)
 
     input_ids, attention_mask = tokenized['input_ids'], tokenized['attention_mask']
@@ -427,8 +428,8 @@ while iter_num < max_iter_num:
     epoch = iter_num // train_set_len
     
     set_seed(random_seed) #TODO: find better solution for reproducibility?
-    batch_idx = iter_num % math.ceil(train_set_len / batch_size)
-    input_ids, attention_mask, labels = get_batch('train', batch_idx, min(batch_size, train_set_len - batch_idx * batch_size), tokenizer, max_input_length)
+    batch_idx = (iter_num % math.ceil(train_set_len / batch_size)) * batch_size 
+    input_ids, attention_mask, labels = get_batch('train', batch_idx, min(batch_size, train_set_len - batch_idx), tokenizer, max_input_length)
     
     # with open(os.path.join(out_dir, 'batch.jsonl'), 'a') as f:
     #     f.write(json.dumps({'text': batch['text']}) + '\n')
@@ -513,8 +514,8 @@ while iter_num < max_iter_num:
         total_predictions = 0
 
         for eval_iter in range(num_eval_batches):
-            batch_idx = eval_iter % math.ceil(val_set_len / batch_size)
-            input_ids, attention_mask, labels = get_batch('validation', batch_idx, min(batch_size, train_set_len - batch_idx * batch_size), tokenizer, max_input_length)
+            batch_idx = (eval_iter % math.ceil(val_set_len / batch_size)) * batch_size
+            input_ids, attention_mask, labels = get_batch('validation', batch_idx, min(batch_size, train_set_len - batch_idx), tokenizer, max_input_length)
 
             with type_casting:
 
