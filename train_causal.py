@@ -12,7 +12,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 from contextlib import nullcontext
 from schedulers import CosineWDSchedule, ExponentialMovingAverageSchedule, WarmupCosineSchedule
-from models import BidirectionalEncoder, EncoderConfig, BidirectionalPredictor, PredictorConfig
+from models import CausalEncoder, EncoderConfig, CausalPredictor, PredictorConfig
 from transformers import LlamaTokenizer
 from datasets import load_from_disk
 from tqdm import tqdm
@@ -98,8 +98,8 @@ class TrainRunConfig:
     random_seed: int = 42
 
 train_run_config = TrainRunConfig(
-    batch_size = 64,
-    accumulation_steps=32,
+    batch_size = 224,
+    accumulation_steps=8,
     eval_interval=1024,
     num_eval_batches = 200,
     max_iter_num=None,
@@ -122,9 +122,9 @@ class OptimizerConfig:
 
 #%%
 opt_config = OptimizerConfig(
-    num_epochs = 5,
+    num_epochs = 15,
     ema = (0.998, 1.0),
-    bipe_scale = 1.25, # batch iterations per epoch scale
+    bipe_scale = 1.025, # batch iterations per epoch scale
     weight_decay = 0.04,
     final_weight_decay = 0.4,
     warmup_steps = 3,
@@ -152,56 +152,56 @@ target_block_min_num = 1
 
 #%%
 # new format
-target_masking_strategies = [
-    # R denoising
-    # {
-    #     "target_block_size" : 3,
-    #     # "target_block_size_std" : 0.15,
-    #     "target_max_mask_ratio" : 0.25,
-    #     "target_block_max_num" : None,
-    # },
-    {
-        "target_block_size" : 8,
-        # "target_block_size_std" : 0.15,
-        "target_max_mask_ratio" : 0.35,
-        "target_block_max_num" : None,
-    },
-    # X denoising
-    {
-        "target_block_size" : 3,
-        # "target_block_size_std" : 0.5,
-        "target_max_mask_ratio" : 0.5,
-        "target_block_max_num" : None,
-    },
-    # {
-    #     "target_block_size" : 8,
-    #     # "target_block_size_std" : 0.5,
-    #     "target_max_mask_ratio" : 0.8,
-    #     "target_block_max_num" : None,
-    # },
-    # {
-    #     "target_block_size" : 64,
-    #     # "target_block_size_std" : 0.5,
-    #     "target_max_mask_ratio" : 0.15,
-    # },
-    {
-        "target_block_size" : 64,
-        # "target_block_size_std" : 0.5,
-        "target_max_mask_ratio" : 0.35,
-    },
-    # S denoising
-    # {
-    #     "target_block_size" : None,
-    #     # "target_block_size_std" : 0.5,
-    #     "target_mask_start_ratio" : 0.75,
-    #     "target_max_mask_ratio" : 0.25,
-    #     "target_block_max_num" : 1,
-    #     "context_max_mask_ratio" : 1.0,
-    # }
+# target_masking_strategies = [
+#     # R denoising
+#     # {
+#     #     "target_block_size" : 3,
+#     #     # "target_block_size_std" : 0.15,
+#     #     "target_max_mask_ratio" : 0.25,
+#     #     "target_block_max_num" : None,
+#     # },
+#     {
+#         "target_block_size" : 8,
+#         # "target_block_size_std" : 0.15,
+#         "target_max_mask_ratio" : 0.35,
+#         "target_block_max_num" : None,
+#     },
+#     # X denoising
+#     {
+#         "target_block_size" : 3,
+#         # "target_block_size_std" : 0.5,
+#         "target_max_mask_ratio" : 0.5,
+#         "target_block_max_num" : None,
+#     },
+#     # {
+#     #     "target_block_size" : 8,
+#     #     # "target_block_size_std" : 0.5,
+#     #     "target_max_mask_ratio" : 0.8,
+#     #     "target_block_max_num" : None,
+#     # },
+#     # {
+#     #     "target_block_size" : 64,
+#     #     # "target_block_size_std" : 0.5,
+#     #     "target_max_mask_ratio" : 0.15,
+#     # },
+#     {
+#         "target_block_size" : 64,
+#         # "target_block_size_std" : 0.5,
+#         "target_max_mask_ratio" : 0.35,
+#     },
+#     # S denoising
+#     # {
+#     #     "target_block_size" : None,
+#     #     # "target_block_size_std" : 0.5,
+#     #     "target_mask_start_ratio" : 0.75,
+#     #     "target_max_mask_ratio" : 0.25,
+#     #     "target_block_max_num" : 1,
+#     #     "context_max_mask_ratio" : 1.0,
+#     # }
 
-]
+# ]
 
-target_masking_strategies = target_masking_strategies if not args.target_masking_strategies_path else json_to_dict(args.target_masking_strategies_path)
+# target_masking_strategies = target_masking_strategies if not args.target_masking_strategies_path else json_to_dict(args.target_masking_strategies_path)
 
 #%%
 dataset_name = "MiniPile"
@@ -210,7 +210,7 @@ dataset_dir = os.path.join("data", dataset_name)
 max_input_length = 256
 #%%
 wandb_log = True
-wandb_project = "t-jepa-MiniPile-256ctx"
+wandb_project = "t-jepa-MiniPile-256ctx-causal"
 wandb_run_name = "v1" #-1_epoch
 
 # compile_model = True 
@@ -267,13 +267,13 @@ grad_clip = 10.0
 if init_from == "scratch":
     set_seed(random_seed)
 
-    context_encoder = BidirectionalEncoder(encoder_config) # initialize context encoder
+    context_encoder = CausalEncoder(encoder_config) # initialize context encoder
     target_encoder = copy.deepcopy(context_encoder) # create target encoder as a copy of context encoder
     # freeze target encoder
     for param in target_encoder.parameters():
         param.requires_grad = False
 
-    predictor = BidirectionalPredictor(predictor_config) # initialize predictor
+    predictor = CausalPredictor(predictor_config) # initialize predictor
 
     if os.path.exists(out_dir):
         shutil.rmtree(out_dir)
@@ -285,9 +285,9 @@ if init_from == "scratch":
     dataclass_to_json(predictor_config, predictor_config_path)
     dataclass_to_json(opt_config, opt_config_path)
     dataclass_to_json(train_run_config, train_run_config_path)
-    dict_to_json(target_masking_strategies, target_masking_strategies_path)
-    with open(target_masking_strategies_path, 'w') as f:
-        json.dump(target_masking_strategies, f, indent=2)
+    # dict_to_json(target_masking_strategies, target_masking_strategies_path)
+    # with open(target_masking_strategies_path, 'w') as f:
+    #     json.dump(target_masking_strategies, f, indent=2)
 
     
 elif init_from == "resume":
@@ -295,12 +295,12 @@ elif init_from == "resume":
     predictor_config = json_to_dataclass(PredictorConfig, predictor_config_path)
     opt_config = json_to_dataclass(OptimizerConfig, opt_config_path)
     train_run_config = json_to_dataclass(TrainRunConfig, train_run_config_path)
-    target_masking_strategies = json_to_dict(target_masking_strategies_path)
+    # target_masking_strategies = json_to_dict(target_masking_strategies_path)
 
 
-    context_encoder = BidirectionalEncoder(encoder_config)
-    target_encoder = BidirectionalEncoder(encoder_config)
-    predictor = BidirectionalPredictor(predictor_config)
+    context_encoder = CausalEncoder(encoder_config)
+    target_encoder = CausalEncoder(encoder_config)
+    predictor = CausalPredictor(predictor_config)
 
     resume_context_encoder_path = train_context_encoder_path if resume_from == "train" else context_encoder_path
     resume_target_encoder_path = train_target_encoder_path if resume_from == "train" else target_encoder_path
@@ -330,7 +330,7 @@ if wandb_log:
             'predictor_config': predictor_config.__dict__ | {"n_params": predictor.get_num_params()},
             'opt_config': opt_config.__dict__,
             'train_run_config': train_run_config.__dict__,
-            'target_masking_strategies': target_masking_strategies,
+            # 'target_masking_strategies': target_masking_strategies,
         },
         resume=True if init_from == "resume" else False
         )
@@ -449,81 +449,81 @@ ema_scheduler = ExponentialMovingAverageSchedule(
 
 
 #%%
-def collate_jepa_input_data(input_attn_mask, true_input_lengths, target_max_mask_ratio, target_mask_start_ratio, target_block_nums, target_block_size, context_max_mask_ratio):
-    batch_count = true_input_lengths.shape[0]  # get the batch count
-    max_length = input_attn_mask.shape[1]  # get the maximum length of the input
+# def collate_jepa_input_data(input_attn_mask, true_input_lengths, target_max_mask_ratio, target_mask_start_ratio, target_block_nums, target_block_size, context_max_mask_ratio):
+#     batch_count = true_input_lengths.shape[0]  # get the batch count
+#     max_length = input_attn_mask.shape[1]  # get the maximum length of the input
 
     
-    target_block_max_num = np.ceil(np.max(target_block_nums)).astype(int)  # get the maximum number of target blocks
-    target_block_sizes = np.clip((true_input_lengths * target_max_mask_ratio // target_block_nums), 1, target_block_size).astype(int)  # compute the target block sizes for each sample
-    target_max_block_size = np.max(target_block_sizes)  # get the maximum target block size
-    target_min_start_indices = np.clip(np.ceil(true_input_lengths * target_mask_start_ratio).astype(int), 0, None)  # compute the minimum starting index for the target blocks
+#     target_block_max_num = np.ceil(np.max(target_block_nums)).astype(int)  # get the maximum number of target blocks
+#     target_block_sizes = np.clip((true_input_lengths * target_max_mask_ratio // target_block_nums), 1, target_block_size).astype(int)  # compute the target block sizes for each sample
+#     target_max_block_size = np.max(target_block_sizes)  # get the maximum target block size
+#     target_min_start_indices = np.clip(np.ceil(true_input_lengths * target_mask_start_ratio).astype(int), 0, None)  # compute the minimum starting index for the target blocks
     
-    # we need to shrink the input value for randperm such that only n amount of possible start values can be selected
-    potential_start_indices_max = np.clip(true_input_lengths - target_min_start_indices - target_block_sizes, 1, None)
+#     # we need to shrink the input value for randperm such that only n amount of possible start values can be selected
+#     potential_start_indices_max = np.clip(true_input_lengths - target_min_start_indices - target_block_sizes, 1, None)
 
-    target_block_start_indices = np.stack(
-        [
-            np.tile(
-                np.random.permutation(max_index), 
-                (np.ceil(target_max_block_size * target_block_max_num / max_index).astype(int))
-            )[:target_block_max_num] 
-            for max_index in potential_start_indices_max
-        ]
-    ) + target_min_start_indices.reshape(-1, 1)
+#     target_block_start_indices = np.stack(
+#         [
+#             np.tile(
+#                 np.random.permutation(max_index), 
+#                 (np.ceil(target_max_block_size * target_block_max_num / max_index).astype(int))
+#             )[:target_block_max_num] 
+#             for max_index in potential_start_indices_max
+#         ]
+#     ) + target_min_start_indices.reshape(-1, 1)
     
-    target_blocks_indices = np.ones((batch_count, target_block_max_num, target_max_block_size), dtype = np.int64) * target_block_start_indices.reshape((batch_count, target_block_max_num, 1))
-    # for each sample add the indices of the target blocks to the tensor by applying a range to each row of the index tensors
-    for batch_index in range(batch_count):
-        # if the target block size is smaller than the max target block size, then the indices past the target block size will not be updated (they are handled by the attention mask)
-        target_blocks_indices[batch_index, :, :target_block_sizes[batch_index]] += np.arange(target_block_sizes[batch_index]).reshape(1, -1) # add the indices of the target blocks to the tensor
-    # for target packing we flatten the target block indices to the shape of (batch_size, target_block_max_num * block_size)
-    target_blocks_indices = target_blocks_indices.reshape(batch_count, -1)
-    # target embeddings will be arranged in the following way: 
-    # ((batch_sample_0, target_block_0 + ... + target_block_n, embedding_size),
-    #  ...
-    # (batch_sample_n, target_block_0 + ... + target_block_n, embedding_size) 
-    # )
+#     target_blocks_indices = np.ones((batch_count, target_block_max_num, target_max_block_size), dtype = np.int64) * target_block_start_indices.reshape((batch_count, target_block_max_num, 1))
+#     # for each sample add the indices of the target blocks to the tensor by applying a range to each row of the index tensors
+#     for batch_index in range(batch_count):
+#         # if the target block size is smaller than the max target block size, then the indices past the target block size will not be updated (they are handled by the attention mask)
+#         target_blocks_indices[batch_index, :, :target_block_sizes[batch_index]] += np.arange(target_block_sizes[batch_index]).reshape(1, -1) # add the indices of the target blocks to the tensor
+#     # for target packing we flatten the target block indices to the shape of (batch_size, target_block_max_num * block_size)
+#     target_blocks_indices = target_blocks_indices.reshape(batch_count, -1)
+#     # target embeddings will be arranged in the following way: 
+#     # ((batch_sample_0, target_block_0 + ... + target_block_n, embedding_size),
+#     #  ...
+#     # (batch_sample_n, target_block_0 + ... + target_block_n, embedding_size) 
+#     # )
     
-    # create boolean mask of allowed inputs in the context
-    allowed_in_context = input_attn_mask.copy().astype(bool) # create a tensor of trues, representing the allowed inputs in the context
-    for batch_index, target_block_range in enumerate(target_blocks_indices):
-        # get the relevant target block range for each sample which correspond to the number of target blocks and the target block size
-        utilized_target_indices_range = (target_block_nums[batch_index] - 1) * target_max_block_size + target_block_sizes[batch_index]
-        relevant_target_block_range = target_block_range[: utilized_target_indices_range]
-        allowed_in_context[batch_index, relevant_target_block_range] = False
-    # make sure all context blocks have the same length
-    context_lengths = np.sum(allowed_in_context, axis=1)
-    assert np.all(context_lengths > 0), "All samples must have at least one input in the context"
-    max_allowed_context_lengths = np.min(np.array([context_lengths, np.clip(true_input_lengths * context_max_mask_ratio, 1, None).astype(int)]), axis=0) # compute the max allowed context lengths
-    max_context_length = np.max(max_allowed_context_lengths) # get the max allowed context length
+#     # create boolean mask of allowed inputs in the context
+#     allowed_in_context = input_attn_mask.copy().astype(bool) # create a tensor of trues, representing the allowed inputs in the context
+#     for batch_index, target_block_range in enumerate(target_blocks_indices):
+#         # get the relevant target block range for each sample which correspond to the number of target blocks and the target block size
+#         utilized_target_indices_range = (target_block_nums[batch_index] - 1) * target_max_block_size + target_block_sizes[batch_index]
+#         relevant_target_block_range = target_block_range[: utilized_target_indices_range]
+#         allowed_in_context[batch_index, relevant_target_block_range] = False
+#     # make sure all context blocks have the same length
+#     context_lengths = np.sum(allowed_in_context, axis=1)
+#     assert np.all(context_lengths > 0), "All samples must have at least one input in the context"
+#     max_allowed_context_lengths = np.min(np.array([context_lengths, np.clip(true_input_lengths * context_max_mask_ratio, 1, None).astype(int)]), axis=0) # compute the max allowed context lengths
+#     max_context_length = np.max(max_allowed_context_lengths) # get the max allowed context length
     
-    context_blocks_indices = np.zeros((batch_count, max_context_length), dtype=np.int64) # create a tensor of zeros for the context blocks indices
-    context_attn_mask = np.zeros((batch_count, max_context_length), dtype=bool) # create a tensor of zeros for the context attention mask
+#     context_blocks_indices = np.zeros((batch_count, max_context_length), dtype=np.int64) # create a tensor of zeros for the context blocks indices
+#     context_attn_mask = np.zeros((batch_count, max_context_length), dtype=bool) # create a tensor of zeros for the context attention mask
     
-    for batch_index, allowed_context_length in enumerate(max_allowed_context_lengths): # for each sample
-        context_block_indices = np.arange(0, max_length)[allowed_in_context[batch_index]]  # get the indices of the context inputs
-        perm = np.random.permutation(len(context_block_indices))  # shuffle the indices
-        idx = perm[:allowed_context_length] # select indices up to the allowed context length for the sample
-        context_blocks_indices[batch_index, :allowed_context_length] = context_block_indices[idx]  # set the context blocks indices
-        context_attn_mask[batch_index, :allowed_context_length] = True  # set the attention mask to true for the context inputs
+#     for batch_index, allowed_context_length in enumerate(max_allowed_context_lengths): # for each sample
+#         context_block_indices = np.arange(0, max_length)[allowed_in_context[batch_index]]  # get the indices of the context inputs
+#         perm = np.random.permutation(len(context_block_indices))  # shuffle the indices
+#         idx = perm[:allowed_context_length] # select indices up to the allowed context length for the sample
+#         context_blocks_indices[batch_index, :allowed_context_length] = context_block_indices[idx]  # set the context blocks indices
+#         context_attn_mask[batch_index, :allowed_context_length] = True  # set the attention mask to true for the context inputs
 
-    # concatenate the context and target indices to get the predictor input indices
-    predictor_input_indices = np.concatenate((context_blocks_indices, target_blocks_indices), axis=1)
+#     # concatenate the context and target indices to get the predictor input indices
+#     predictor_input_indices = np.concatenate((context_blocks_indices, target_blocks_indices), axis=1)
 
-    prediction_input_size = max_context_length + target_max_block_size * target_block_max_num
-    # create the predictor attention mask
-    predictor_attn_mask = np.zeros((batch_count, prediction_input_size, prediction_input_size), dtype=bool) # pred_context_attn_mask[:, np.newaxis, :] * pred_context_attn_mask[:, :, np.newaxis]
-    for batch_index, block_size in enumerate(target_block_sizes):
-        # have all inputs attend the context
-        allowed_context_length = max_allowed_context_lengths[batch_index]
-        predictor_attn_mask[batch_index, :, :allowed_context_length] = True
-        for target_block_index in range(target_block_nums[batch_index]):
-            # have all inputs in a target block attend to each other (as well as the context)
-            target_attn_start_index = max_context_length + target_block_index * target_max_block_size
-            predictor_attn_mask[batch_index, target_attn_start_index:target_attn_start_index+block_size, target_attn_start_index:target_attn_start_index+block_size] = True
+#     prediction_input_size = max_context_length + target_max_block_size * target_block_max_num
+#     # create the predictor attention mask
+#     predictor_attn_mask = np.zeros((batch_count, prediction_input_size, prediction_input_size), dtype=bool) # pred_context_attn_mask[:, np.newaxis, :] * pred_context_attn_mask[:, :, np.newaxis]
+#     for batch_index, block_size in enumerate(target_block_sizes):
+#         # have all inputs attend the context
+#         allowed_context_length = max_allowed_context_lengths[batch_index]
+#         predictor_attn_mask[batch_index, :, :allowed_context_length] = True
+#         for target_block_index in range(target_block_nums[batch_index]):
+#             # have all inputs in a target block attend to each other (as well as the context)
+#             target_attn_start_index = max_context_length + target_block_index * target_max_block_size
+#             predictor_attn_mask[batch_index, target_attn_start_index:target_attn_start_index+block_size, target_attn_start_index:target_attn_start_index+block_size] = True
 
-    return target_blocks_indices, context_blocks_indices, context_attn_mask, predictor_input_indices, predictor_attn_mask
+#     return target_blocks_indices, context_blocks_indices, context_attn_mask, predictor_input_indices, predictor_attn_mask
 
 class ResumableSampler:
     def __init__(self, dataset_len, offset = 0, batch_size = 1):
@@ -542,30 +542,30 @@ class ResumableSampler:
             self.iter += 1
 
 class TJEPABatch:
-    def __init__(self, input_ids, attention_mask, target_masking_strategy_data_list):
+    def __init__(self, input_ids, attention_mask):
         self.input_ids = input_ids
         self.attention_mask = attention_mask
-        self.target_masking_strategy_data_list = target_masking_strategy_data_list
+        # self.target_masking_strategy_data_list = target_masking_strategy_data_list
 
     def pin_memory(self):
         self.input_ids = self.input_ids.pin_memory()
         self.attention_mask = self.attention_mask.pin_memory()
-        self.target_masking_strategy_data_list = [tuple(map(lambda x: x.pin_memory(), strategy_data)) for strategy_data in self.target_masking_strategy_data_list]
+        # self.target_masking_strategy_data_list = [tuple(map(lambda x: x.pin_memory(), strategy_data)) for strategy_data in self.target_masking_strategy_data_list]
 
         return self
     
     def __iter__(self):
-        return iter([self.input_ids, self.attention_mask, self.target_masking_strategy_data_list])
+        return iter([self.input_ids, self.attention_mask])
 
 class TJEPADataCollator:
-    def __init__(self, tokenizer, target_masking_strategies, max_length, context_max_mask_ratio, target_max_mask_ratio, target_block_max_num, target_block_min_num):
+    def __init__(self, tokenizer, max_length):
         self.tokenizer = tokenizer
-        self.target_masking_strategies = target_masking_strategies
+        # self.target_masking_strategies = target_masking_strategies
         self.max_length = max_length
-        self.context_max_mask_ratio = context_max_mask_ratio # how much of the input should be included in the context
-        self.target_max_mask_ratio = target_max_mask_ratio # how much of the input should be used for targets
-        self.target_block_max_num = target_block_max_num
-        self.target_block_min_num = target_block_min_num 
+        # self.context_max_mask_ratio = context_max_mask_ratio # how much of the input should be included in the context
+        # self.target_max_mask_ratio = target_max_mask_ratio # how much of the input should be used for targets
+        # self.target_block_max_num = target_block_max_num
+        # self.target_block_min_num = target_block_min_num 
 
     def __call__(self, batch):
         tokenized = self.tokenizer([b['text'] for b in batch], padding = True, truncation = True, max_length = self.max_length, return_tensors="np", add_special_tokens = False)
@@ -578,21 +578,21 @@ class TJEPADataCollator:
         input_ids = input_ids[mask]
         attention_mask = attention_mask[mask]
 
-        true_input_lengths = np.sum(attention_mask, axis = 1)
+        # true_input_lengths = np.sum(attention_mask, axis = 1)
 
-        target_masking_strategy_data_list = []
-        for strategy in self.target_masking_strategies:
-            target_max_mask_ratio = strategy.get("target_max_mask_ratio", self.target_max_mask_ratio)
-            context_max_mask_ratio = strategy.get("context_max_mask_ratio", self.context_max_mask_ratio)
-            target_block_size = strategy.get("target_block_size", 1)
+        # target_masking_strategy_data_list = []
+        # for strategy in self.target_masking_strategies:
+        #     target_max_mask_ratio = strategy.get("target_max_mask_ratio", self.target_max_mask_ratio)
+        #     context_max_mask_ratio = strategy.get("context_max_mask_ratio", self.context_max_mask_ratio)
+        #     target_block_size = strategy.get("target_block_size", 1)
             
-            target_block_nums = np.array([strategy.get("target_block_max_num")] * len(true_input_lengths)) if strategy.get("target_block_max_num") is not None else true_input_lengths * target_max_mask_ratio // strategy.get("target_block_size", 1)
-            target_block_nums = np.where(target_block_nums < target_block_min_num, target_block_min_num, target_block_nums).astype(int)
-            target_mask_start_ratio = strategy.get("target_mask_start_ratio", 0.0)
+        #     target_block_nums = np.array([strategy.get("target_block_max_num")] * len(true_input_lengths)) if strategy.get("target_block_max_num") is not None else true_input_lengths * target_max_mask_ratio // strategy.get("target_block_size", 1)
+        #     target_block_nums = np.where(target_block_nums < target_block_min_num, target_block_min_num, target_block_nums).astype(int)
+        #     target_mask_start_ratio = strategy.get("target_mask_start_ratio", 0.0)
 
-            target_masking_strategy_data_list.append(tuple(map(lambda x: torch.from_numpy(x), collate_jepa_input_data(attention_mask, true_input_lengths, target_max_mask_ratio, target_mask_start_ratio, target_block_nums, target_block_size, context_max_mask_ratio))))
+        #     target_masking_strategy_data_list.append(tuple(map(lambda x: torch.from_numpy(x), collate_jepa_input_data(attention_mask, true_input_lengths, target_max_mask_ratio, target_mask_start_ratio, target_block_nums, target_block_size, context_max_mask_ratio))))
 
-        return TJEPABatch(torch.from_numpy(input_ids), torch.from_numpy(attention_mask), target_masking_strategy_data_list)
+        return TJEPABatch(torch.from_numpy(input_ids), torch.from_numpy(attention_mask))
     
 
 #%%
@@ -601,58 +601,57 @@ def compute_jepa_loss(
         predictor,
         input_ids, 
         target_embeddings, 
-        target_block_indices, 
-        context_block_indices, 
-        context_attn_mask, 
-        prediction_input_indices, 
-        prediction_attn_mask,
-        device = 'cpu'
+        attn_mask,
     ):
-    batch_count = input_ids.shape[0]
+    # batch_count = input_ids.shape[0]
 
-    target_blocks_embeddings = torch.stack([target_embeddings[index,target_block_range,:] for index, target_block_range in enumerate(target_block_indices)]) # get the target embeddings
+    # target_embeddings = target_embeddings # get all the embeddings 
 
-    # predict target blocks from context blocks
-    mask_token_embedding = predictor.get_mask_token_embedding()
-    # mask_toke_embeddings are the same so we can just repeat them, the will only be differentiated by the position embeddings
-    prediction_embeddings = mask_token_embedding.repeat(batch_count, target_block_indices.shape[1], 1) # for the batch size, for the largest target block * number of targets per block, repeat the mask token 
+    # target_blocks_embeddings = torch.stack([target_embeddings[index,target_block_range,:] for index, target_block_range in enumerate(target_block_indices)]) # get the target embeddings
 
-    context_inputs = torch.gather(input_ids, 1, context_block_indices)
+
+
+    # context_inputs = torch.gather(input_ids, 1, context_block_indices)
 
     # get the context blocks embeddings
-    context_blocks_embeddings = context_encoder(context_inputs, id_indices=context_block_indices, attn_mask=context_attn_mask.unsqueeze(1).unsqueeze(1))
+    context_embeddings = context_encoder(input_ids) #, attn_mask=context_attn_mask.unsqueeze(1).unsqueeze(1))
 
-    input_embeddings = torch.cat((context_blocks_embeddings, prediction_embeddings), dim = 1) # concatenate the context and prediction embeddings
+    # # predict target blocks from context blocks
+    # mask_token_embedding = predictor.get_mask_token_embedding()
+    # # # mask_toke_embeddings are the same so we can just repeat them, the will only be differentiated by the position embeddings
+    # prediction_embeddings = mask_token_embedding.repeat(batch_count, 1, 1) # for the batch size, for the largest target block * number of targets per block, repeat the mask token 
+    # # concatenate the context and prediction embedding
+    # input_embeddings = torch.cat((prediction_embeddings, context_embeddings), dim = 1) # concatenate the context and prediction embeddings
 
-    predicted_embeddings = predictor(input_embeddings, prediction_input_indices, attn_mask=prediction_attn_mask.unsqueeze(1)) # predict the target embeddings
+    predicted_target_embeddings = predictor(context_embeddings) #, attn_mask=prediction_attn_mask.unsqueeze(1).unsqueeze(1)) # predict the target embeddings
 
-    _, context_length, _ = context_blocks_embeddings.shape
-    predicted_target_embeddings = predicted_embeddings[:,context_length:] # remove the context predictions
+    # _, context_length, _ = context_blocks_embeddings.shape
+    # predicted_target_embeddings = predicted_embeddings[:,context_length:] # remove the context predictions
 
-    # only attend to the embeddings of the predicted target blocks
-    relevant_target_attn_mask = torch.diagonal(prediction_attn_mask, dim1=1, dim2=2)
-    relevant_target_attn_mask = relevant_target_attn_mask[:, context_length:].unsqueeze(2)
+    # # only attend to the embeddings of the predicted target blocks
+    # relevant_target_attn_mask = torch.diagonal(prediction_attn_mask, dim1=1, dim2=2)
+    # relevant_target_attn_mask = relevant_target_attn_mask[:, context_length:].unsqueeze(2)
 
     # compute the loss of the masked predictions
-    embedding_losses = F.smooth_l1_loss(predicted_target_embeddings, target_blocks_embeddings.view(predicted_target_embeddings.shape), reduction='none') # compute the loss
+    embedding_losses = F.smooth_l1_loss(predicted_target_embeddings[:, :-1, :], target_embeddings[:, 1:, :], reduction='none') # compute the loss
 
     # mask the losses
-    masked_embedding_losses = embedding_losses * relevant_target_attn_mask
+    masked_embedding_losses = embedding_losses * attn_mask.unsqueeze(2)[:, 1:]
 
     # compute the loss
-    loss = torch.sum(masked_embedding_losses) / torch.sum(relevant_target_attn_mask)
+    loss = torch.sum(masked_embedding_losses) / torch.sum(attn_mask)
 
     return loss    
 
 #%%
 collator = TJEPADataCollator(
     tokenizer, 
-    target_masking_strategies,
+    # target_masking_strategies,
     max_input_length, 
-    default_context_max_mask_ratio,
-    default_target_max_mask_ratio,
-    target_block_max_num,
-    target_block_min_num,
+    # default_context_max_mask_ratio,
+    # default_target_max_mask_ratio,
+    # target_block_max_num,
+    # target_block_min_num,
 )
 
 train_sampler = ResumableSampler(
@@ -679,10 +678,10 @@ pbar = tqdm(total=max_iter_num - iter_num, bar_format="{l_bar}{bar}| {n_fmt}/{to
 while iter_num < max_iter_num:
     epoch = iter_num // train_set_len
 
-    input_ids, attention_mask, strategies = next(train_loader_iter)
+    input_ids, attention_mask = next(train_loader_iter)
     input_ids = input_ids.to(device, non_blocking=True)
     attention_mask = attention_mask.to(device, non_blocking=True)
-    strategy_count = len(strategies)
+    # strategy_count = len(strategies)
     # with open(os.path.join(out_dir, 'batch.jsonl'), 'a') as f:
     #     f.write(json.dumps({'text': batch['text']}) + '\n')
     with torch.no_grad(), type_casting:
@@ -691,34 +690,30 @@ while iter_num < max_iter_num:
 
 
     train_loss = 0
-    for target_block_indices, context_block_indices, context_attention_mask, prediction_input_indices, prediction_attn_mask in strategies:
+    # for target_block_indices, context_block_indices, context_attention_mask, prediction_input_indices, prediction_attn_mask in strategies:
         
-        target_block_indices = target_block_indices.to(device, non_blocking=True)
-        context_block_indices = context_block_indices.to(device, non_blocking=True)
-        context_attention_mask = context_attention_mask.to(device, non_blocking=True)
-        prediction_input_indices = prediction_input_indices.to(device, non_blocking=True)
-        prediction_attn_mask = prediction_attn_mask.to(device, non_blocking=True)
+    # target_block_indices = target_block_indices.to(device, non_blocking=True)
+    # context_block_indices = context_block_indices.to(device, non_blocking=True)
+    # context_attention_mask = context_attention_mask.to(device, non_blocking=True)
+    # prediction_input_indices = prediction_input_indices.to(device, non_blocking=True)
+    # prediction_attn_mask = prediction_attn_mask.to(device, non_blocking=True)
 
-        with type_casting:
-            loss = compute_jepa_loss(
-                context_encoder, 
-                predictor,
-                input_ids, 
-                target_embeddings, 
-                target_block_indices, 
-                context_block_indices, 
-                context_attention_mask, 
-                prediction_input_indices, 
-                prediction_attn_mask,
-                device = device
-            )
+    with type_casting:
+        loss = compute_jepa_loss(
+            context_encoder, 
+            predictor,
+            input_ids, 
+            target_embeddings, 
+            attention_mask
+        )
 
-        assert not torch.isnan(loss), 'loss is nan!'
+    assert not torch.isnan(loss), 'loss is nan!'
 
-        loss /= strategy_count
-        train_loss += loss.item()
-        loss /= accumulation_steps
-        scaler.scale(loss).backward()
+        # loss /= strategy_count
+    
+    train_loss += loss.item()
+    loss /= accumulation_steps
+    scaler.scale(loss).backward()
 
     true_input_lengths = torch.sum(attention_mask, dim = 1).to('cpu') # get the true input length for each sample
     total_inputs_seen += sum(true_input_lengths)
@@ -786,10 +781,10 @@ while iter_num < max_iter_num:
             # for input_ids, attention_mask, strategies in val_loader:
             for eval_iter in range(num_eval_batches):
                 
-                input_ids, attention_mask, strategies = next(val_loader_iter)
+                input_ids, attention_mask = next(val_loader_iter)
                 input_ids = input_ids.to(device, non_blocking=True)
                 attention_mask = attention_mask.to(device, non_blocking=True)
-                strategy_count = len(strategies)
+                # strategy_count = len(strategies)
 
                 with type_casting:
                     target_embeddings = target_encoder(input_ids, attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()) # get target embeddings, no need to provide input indices.
@@ -798,31 +793,26 @@ while iter_num < max_iter_num:
                 # true_input_lengths = torch.sum(attention_mask, dim = 1).to('cpu') # get the true input length for each sample
 
                 eval_loss = 0
-                for target_block_indices, context_block_indices, context_attention_mask, prediction_input_indices, prediction_attn_mask in strategies:
+                # for target_block_indices, context_block_indices, context_attention_mask, prediction_input_indices, prediction_attn_mask in strategies:
                     
-                    target_block_indices = target_block_indices.to(device, non_blocking=True)
-                    context_block_indices = context_block_indices.to(device, non_blocking=True)
-                    context_attention_mask = context_attention_mask.to(device, non_blocking=True)
-                    prediction_input_indices = prediction_input_indices.to(device, non_blocking=True)
-                    prediction_attn_mask = prediction_attn_mask.to(device, non_blocking=True)
+                #     target_block_indices = target_block_indices.to(device, non_blocking=True)
+                #     context_block_indices = context_block_indices.to(device, non_blocking=True)
+                #     context_attention_mask = context_attention_mask.to(device, non_blocking=True)
+                #     prediction_input_indices = prediction_input_indices.to(device, non_blocking=True)
+                #     prediction_attn_mask = prediction_attn_mask.to(device, non_blocking=True)
 
-                    with type_casting:
-                        loss = compute_jepa_loss(
-                            context_encoder, 
-                            predictor,
-                            input_ids, 
-                            target_embeddings, 
-                            target_block_indices, 
-                            context_block_indices, 
-                            context_attention_mask, 
-                            prediction_input_indices, 
-                            prediction_attn_mask,
-                            device = device
-                        )
+                with type_casting:
+                    loss = compute_jepa_loss(
+                        context_encoder, 
+                        predictor,
+                        input_ids, 
+                        target_embeddings, 
+                        attention_mask
+                    )
 
-                    assert not torch.isnan(loss), 'loss is nan!'
-                    loss /= strategy_count
-                    eval_loss += loss.item()
+                assert not torch.isnan(loss), 'loss is nan!'
+                # loss /= strategy_count
+                eval_loss += loss.item()
 
                 mean_eval_loss += eval_loss / num_eval_batches
 
