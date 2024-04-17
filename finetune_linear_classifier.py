@@ -13,7 +13,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 from contextlib import nullcontext
 from schedulers import CosineWDSchedule, ExponentialMovingAverageSchedule, WarmupCosineSchedule
-from models import Encoder, EncoderConfig, LinearClassifierProbe, LinearClassifierProbeConfig
+from models import CausalEncoder as Encoder, EncoderConfig, LinearClassifierProbe, LinearClassifierProbeConfig
 from transformers import LlamaTokenizer
 from datasets import load_dataset
 from tqdm import tqdm
@@ -144,7 +144,7 @@ max_input_length = 1024
 #%%
 wandb_log = True
 wandb_project = "t-jepa-sentiment-probing"
-wandb_run_name = "sent" #-1_epoch
+wandb_run_name = "causal-sent" #-1_epoch
 
 # compile_model = True 
 
@@ -435,7 +435,7 @@ while iter_num < max_iter_num:
     #     f.write(json.dumps({'text': batch['text']}) + '\n')
     with type_casting:
         with torch.no_grad():
-            embeddings = context_encoder(input_ids, attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()) # get target embeddings, no need to provide input indices.
+            embeddings = context_encoder(input_ids) # get target embeddings, no need to provide input indices.
         #     target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
             
             embeddings = mean_pooling(embeddings, attention_mask)
@@ -520,7 +520,7 @@ while iter_num < max_iter_num:
             with type_casting:
 
                 with torch.no_grad():
-                    embeddings = context_encoder(input_ids, attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()) # get target embeddings, no need to provide input indices.
+                    embeddings = context_encoder(input_ids) # get target embeddings, no need to provide input indices.
                 #     target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
                     
                     embeddings = mean_pooling(embeddings, attention_mask)
