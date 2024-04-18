@@ -110,7 +110,7 @@ class OptimizerConfig:
     bipe_scale: float = 1.0
     weight_decay: float = 0.04
     final_weight_decay: float = 0.4
-    warmup_steps: int = 0.025
+    warmup_steps: int = 20
     lr: float = 0.0001
     start_lr: float = 0.00002
     final_lr: float = 1.0e-06
@@ -144,7 +144,7 @@ max_input_length = 1024
 #%%
 wandb_log = True
 wandb_project = "t-jepa-sentiment-probing"
-wandb_run_name = "causal-sent" #-1_epoch
+wandb_run_name = "causal-m-sent" #-1_epoch
 
 # compile_model = True 
 
