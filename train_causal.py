@@ -211,7 +211,7 @@ max_input_length = 256
 #%%
 wandb_log = True
 wandb_project = "t-jepa-MiniPile-256ctx-causal"
-wandb_run_name = "v1" #-1_epoch
+wandb_run_name = "mean-v1" #-1_epoch
 
 # compile_model = True 
 
@@ -609,6 +609,13 @@ def compute_jepa_loss(
 
     # target_blocks_embeddings = torch.stack([target_embeddings[index,target_block_range,:] for index, target_block_range in enumerate(target_block_indices)]) # get the target embeddings
 
+    # unfolded_embeddings = target_embeddings.unfold(1, 3, 1) # unfold the embeddings
+
+    window_size = 4
+
+    target_embeddings = target_embeddings.unfold(1, window_size, 1).mean(dim = 3) # average the embeddings
+
+    target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
 
 
     # context_inputs = torch.gather(input_ids, 1, context_block_indices)
@@ -632,11 +639,13 @@ def compute_jepa_loss(
     # relevant_target_attn_mask = torch.diagonal(prediction_attn_mask, dim1=1, dim2=2)
     # relevant_target_attn_mask = relevant_target_attn_mask[:, context_length:].unsqueeze(2)
 
+    prediction_len = target_embeddings.shape[1] - predicted_target_embeddings.shape[1] - 1
+
     # compute the loss of the masked predictions
-    embedding_losses = F.smooth_l1_loss(predicted_target_embeddings[:, :-1, :], target_embeddings[:, 1:, :], reduction='none') # compute the loss
+    embedding_losses = F.smooth_l1_loss(predicted_target_embeddings[:, :prediction_len, :], target_embeddings[:, 1:, :], reduction='none') # compute the loss
 
     # mask the losses
-    masked_embedding_losses = embedding_losses * attn_mask.unsqueeze(2)[:, 1:]
+    masked_embedding_losses = embedding_losses * attn_mask[:, prediction_len * -1:].unsqueeze(2)
 
     # compute the loss
     loss = torch.sum(masked_embedding_losses) / torch.sum(attn_mask)
@@ -685,8 +694,8 @@ while iter_num < max_iter_num:
     # with open(os.path.join(out_dir, 'batch.jsonl'), 'a') as f:
     #     f.write(json.dumps({'text': batch['text']}) + '\n')
     with torch.no_grad(), type_casting:
-        target_embeddings = target_encoder(input_ids, attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()) # get target embeddings, no need to provide input indices.
-        target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
+        target_embeddings = target_encoder(input_ids) # get target embeddings, no need to provide input indices.
+        # target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
 
 
     train_loss = 0
@@ -787,8 +796,8 @@ while iter_num < max_iter_num:
                 # strategy_count = len(strategies)
 
                 with type_casting:
-                    target_embeddings = target_encoder(input_ids, attn_mask = attention_mask.unsqueeze(1).unsqueeze(1).bool()) # get target embeddings, no need to provide input indices.
-                    target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
+                    target_embeddings = target_encoder(input_ids) # get target embeddings, no need to provide input indices.
+                    # target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
                     
                 # true_input_lengths = torch.sum(attention_mask, dim = 1).to('cpu') # get the true input length for each sample
 
