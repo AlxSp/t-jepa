@@ -12,7 +12,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 from contextlib import nullcontext
 from schedulers import CosineWDSchedule, ExponentialMovingAverageSchedule, WarmupCosineSchedule
-from models import CausalEncoder, EncoderConfig, CausalPredictor, PredictorConfig
+from models import CausalEncoder, EncoderConfig, CausalPredictorWithMultiIndexing as Predictor, PredictorConfig
 from transformers import LlamaTokenizer
 from datasets import load_from_disk
 from tqdm import tqdm
@@ -71,7 +71,7 @@ encoder_config = EncoderConfig(
     n_layer = 8,
     n_head = 12,
     n_embd = 384,
-    rotary_n_embd = 32,
+    rotary_n_embd = 16,
     dropout = 0.0,
     bias = True, # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better on small datasets
 ) if not args.encoder_config_path else toml_to_dataclass(EncoderConfig, args.encoder_config_path)
@@ -82,7 +82,7 @@ predictor_config = PredictorConfig(
     n_head = 12,
     ext_n_embd = 384,
     n_embd = 384,
-    rotary_n_embd = 32,
+    rotary_n_embd = 16,
     dropout = 0.0,
     bias = True, # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better on small datasets
     trainable_mask_emb=True#False
@@ -211,7 +211,7 @@ max_input_length = 256
 #%%
 wandb_log = True
 wandb_project = "t-jepa-MiniPile-256ctx-causal"
-wandb_run_name = "mean-v1" #-1_epoch
+wandb_run_name = "multi-mean-v1" #-1_epoch
 
 # compile_model = True 
 
@@ -273,7 +273,7 @@ if init_from == "scratch":
     for param in target_encoder.parameters():
         param.requires_grad = False
 
-    predictor = CausalPredictor(predictor_config) # initialize predictor
+    predictor = Predictor(predictor_config) # initialize predictor
 
     if os.path.exists(out_dir):
         shutil.rmtree(out_dir)
@@ -300,7 +300,7 @@ elif init_from == "resume":
 
     context_encoder = CausalEncoder(encoder_config)
     target_encoder = CausalEncoder(encoder_config)
-    predictor = CausalPredictor(predictor_config)
+    predictor = Predictor(predictor_config)
 
     resume_context_encoder_path = train_context_encoder_path if resume_from == "train" else context_encoder_path
     resume_target_encoder_path = train_target_encoder_path if resume_from == "train" else target_encoder_path
@@ -602,8 +602,10 @@ def compute_jepa_loss(
         input_ids, 
         target_embeddings, 
         attn_mask,
+        window_size,
     ):
-    # batch_count = input_ids.shape[0]
+
+    batch_count = input_ids.shape[0]
 
     # target_embeddings = target_embeddings # get all the embeddings 
 
@@ -611,7 +613,6 @@ def compute_jepa_loss(
 
     # unfolded_embeddings = target_embeddings.unfold(1, 3, 1) # unfold the embeddings
 
-    window_size = 4
 
     target_embeddings = target_embeddings.unfold(1, window_size, 1).mean(dim = 3) # average the embeddings
 
@@ -624,13 +625,13 @@ def compute_jepa_loss(
     context_embeddings = context_encoder(input_ids) #, attn_mask=context_attn_mask.unsqueeze(1).unsqueeze(1))
 
     # # predict target blocks from context blocks
-    # mask_token_embedding = predictor.get_mask_token_embedding()
-    # # # mask_toke_embeddings are the same so we can just repeat them, the will only be differentiated by the position embeddings
-    # prediction_embeddings = mask_token_embedding.repeat(batch_count, 1, 1) # for the batch size, for the largest target block * number of targets per block, repeat the mask token 
-    # # concatenate the context and prediction embedding
-    # input_embeddings = torch.cat((prediction_embeddings, context_embeddings), dim = 1) # concatenate the context and prediction embeddings
+    mask_token_embedding = predictor.get_mask_token_embedding()
+    # # mask_toke_embeddings are the same so we can just repeat them, the will only be differentiated by the position embeddings
+    prediction_embeddings = mask_token_embedding.repeat(batch_count, 1, 1) # for the batch size, for the largest target block * number of targets per block, repeat the mask token 
+    # concatenate the context and prediction embedding
+    input_embeddings = torch.cat((prediction_embeddings, context_embeddings), dim = 1) # concatenate the context and prediction embeddings
 
-    predicted_target_embeddings = predictor(context_embeddings) #, attn_mask=prediction_attn_mask.unsqueeze(1).unsqueeze(1)) # predict the target embeddings
+    predicted_target_embeddings = predictor(input_embeddings, start_offset = 1, end_offset = window_size) #, attn_mask=prediction_attn_mask.unsqueeze(1).unsqueeze(1)) # predict the target embeddings
 
     # _, context_length, _ = context_blocks_embeddings.shape
     # predicted_target_embeddings = predicted_embeddings[:,context_length:] # remove the context predictions
@@ -639,13 +640,15 @@ def compute_jepa_loss(
     # relevant_target_attn_mask = torch.diagonal(prediction_attn_mask, dim1=1, dim2=2)
     # relevant_target_attn_mask = relevant_target_attn_mask[:, context_length:].unsqueeze(2)
 
-    prediction_len = target_embeddings.shape[1] - predicted_target_embeddings.shape[1] - 1
+    # since we are predicting the average of a window of "future" embeddings, the predictions of the last inputs have to be masked
+    valid_target_count = target_embeddings.shape[1]# - predicted_target_embeddings.shape[1] - 1
 
     # compute the loss of the masked predictions
-    embedding_losses = F.smooth_l1_loss(predicted_target_embeddings[:, :prediction_len, :], target_embeddings[:, 1:, :], reduction='none') # compute the loss
+    embedding_losses = F.smooth_l1_loss(predicted_target_embeddings[:, :valid_target_count, :], target_embeddings, reduction='none') # compute the loss
 
     # mask the losses
-    masked_embedding_losses = embedding_losses * attn_mask[:, prediction_len * -1:].unsqueeze(2)
+    # TODO: validate that sliced attn_mask masks out the correct targets  
+    masked_embedding_losses = embedding_losses * attn_mask[:, valid_target_count * -1:].unsqueeze(2)
 
     # compute the loss
     loss = torch.sum(masked_embedding_losses) / torch.sum(attn_mask)
@@ -681,6 +684,7 @@ val_loader = torch.utils.data.DataLoader(dataset['validation'], batch_sampler = 
 val_loader_iter = iter(val_loader)
 
 #%%
+pred_window_sizes = [1, 4, 16, 32]
 total_inputs_seen = 0 if init_from == "scratch" else train_run_data['total_inputs_seen']
 best_loss = 1e9
 pbar = tqdm(total=max_iter_num - iter_num, bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}" + " [{elapsed}<{remaining}, {rate_noinv_fmt}]")
@@ -695,7 +699,7 @@ while iter_num < max_iter_num:
     #     f.write(json.dumps({'text': batch['text']}) + '\n')
     with torch.no_grad(), type_casting:
         target_embeddings = target_encoder(input_ids) # get target embeddings, no need to provide input indices.
-        # target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
+        target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
 
 
     train_loss = 0
@@ -706,23 +710,24 @@ while iter_num < max_iter_num:
     # context_attention_mask = context_attention_mask.to(device, non_blocking=True)
     # prediction_input_indices = prediction_input_indices.to(device, non_blocking=True)
     # prediction_attn_mask = prediction_attn_mask.to(device, non_blocking=True)
+    for pred_window_size in pred_window_sizes:
 
-    with type_casting:
-        loss = compute_jepa_loss(
-            context_encoder, 
-            predictor,
-            input_ids, 
-            target_embeddings, 
-            attention_mask
-        )
+        with type_casting:
+            loss = compute_jepa_loss(
+                context_encoder, 
+                predictor,
+                input_ids, 
+                target_embeddings, 
+                attention_mask,
+                pred_window_size
+            )
 
-    assert not torch.isnan(loss), 'loss is nan!'
+        assert not torch.isnan(loss), 'loss is nan!'
 
-        # loss /= strategy_count
-    
-    train_loss += loss.item()
-    loss /= accumulation_steps
-    scaler.scale(loss).backward()
+        loss /= len(pred_window_sizes)
+        train_loss += loss.item()
+        loss /= accumulation_steps
+        scaler.scale(loss).backward()
 
     true_input_lengths = torch.sum(attention_mask, dim = 1).to('cpu') # get the true input length for each sample
     total_inputs_seen += sum(true_input_lengths)
@@ -797,7 +802,7 @@ while iter_num < max_iter_num:
 
                 with type_casting:
                     target_embeddings = target_encoder(input_ids) # get target embeddings, no need to provide input indices.
-                    # target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
+                    target_embeddings = F.layer_norm(target_embeddings, (target_embeddings.shape[-1],)) # normalize the target embeddings
                     
                 # true_input_lengths = torch.sum(attention_mask, dim = 1).to('cpu') # get the true input length for each sample
 
@@ -809,19 +814,31 @@ while iter_num < max_iter_num:
                 #     context_attention_mask = context_attention_mask.to(device, non_blocking=True)
                 #     prediction_input_indices = prediction_input_indices.to(device, non_blocking=True)
                 #     prediction_attn_mask = prediction_attn_mask.to(device, non_blocking=True)
+                for pred_window_size in pred_window_sizes:
 
-                with type_casting:
-                    loss = compute_jepa_loss(
-                        context_encoder, 
-                        predictor,
-                        input_ids, 
-                        target_embeddings, 
-                        attention_mask
-                    )
+                    with type_casting:
+                        loss = compute_jepa_loss(
+                            context_encoder, 
+                            predictor,
+                            input_ids, 
+                            target_embeddings, 
+                            attention_mask,
+                            pred_window_size
+                        )
 
-                assert not torch.isnan(loss), 'loss is nan!'
-                # loss /= strategy_count
-                eval_loss += loss.item()
+                    assert not torch.isnan(loss), 'loss is nan!'
+                # with type_casting:
+                #     loss = compute_jepa_loss(
+                #         context_encoder, 
+                #         predictor,
+                #         input_ids, 
+                #         target_embeddings, 
+                #         attention_mask
+                #     )
+
+                # assert not torch.isnan(loss), 'loss is nan!'
+                    loss /= len(pred_window_sizes)
+                    eval_loss += loss.item()
 
                 mean_eval_loss += eval_loss / num_eval_batches
 
