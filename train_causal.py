@@ -651,7 +651,7 @@ def compute_jepa_loss(
     masked_embedding_losses = embedding_losses * attn_mask[:, valid_target_count * -1:].unsqueeze(2)
 
     # compute the loss
-    loss = torch.sum(masked_embedding_losses) / torch.sum(attn_mask)
+    loss = torch.sum(masked_embedding_losses) / torch.sum(attn_mask[:, valid_target_count * -1:])
 
     return loss    
 
@@ -684,7 +684,7 @@ val_loader = torch.utils.data.DataLoader(dataset['validation'], batch_sampler = 
 val_loader_iter = iter(val_loader)
 
 #%%
-pred_window_sizes = [1, 4, 16, 32]
+pred_window_sizes = [1, 4, 16, 32, 64]
 total_inputs_seen = 0 if init_from == "scratch" else train_run_data['total_inputs_seen']
 best_loss = 1e9
 pbar = tqdm(total=max_iter_num - iter_num, bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}" + " [{elapsed}<{remaining}, {rate_noinv_fmt}]")
